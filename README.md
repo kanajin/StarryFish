@@ -58,7 +58,7 @@ cd ../..
 python -B tools/package_release.py 0.1.0
 ```
 
-依赖从官方固定 URL 获取并验证 SHA256。太郎/肉鸽固定快照仅用于构建检查；终端用户首装仍解析上游最新版本。包输出在 `dist/`。推送 `v*` 标签会触发 Windows 构建、测试和 GitHub Release；工作流不会访问或上传本地用户资料。
+依赖从官方固定 URL 获取并验证 SHA256。太郎/肉鸽固定快照仅用于构建检查；终端用户首装仍解析上游最新版本。包输出在 `dist/`。推送 `main` 会构建并保留检查产物，推送 `v*` 标签会额外发布 GitHub Release；工作流不会访问或上传本地用户资料。发布新版本前需同时更新 `VERSION` 与 `RELEASE_NOTES.md`，标签版本必须与 `VERSION` 一致。
 
 ## 许可与致谢
 
