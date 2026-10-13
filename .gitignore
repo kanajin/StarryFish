@@ -1,0 +1,14 @@
+**/.build/
+**/.deps/
+**/.sdk/
+**/__pycache__/
+*.pyc
+*.log
+*.pdb
+*.user
+.vs/
+.runtime/
+UserData/
+Validation/
+GbfValidation/
+dist/

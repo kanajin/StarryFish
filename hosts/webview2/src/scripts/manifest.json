@@ -1,0 +1,35 @@
+{
+  "manifest_version": 3,
+  "name": "StarryFish 内置书签与汉化",
+  "version": "1.0.2",
+  "description": "固定GBF书签与汉化脚本；代码随浏览器包更新，译文数据仍联网获取。",
+  "permissions": ["declarativeNetRequestWithHostAccess"],
+  "host_permissions": [
+    "https://api.interpreter.caiyunai.com/*",
+    "https://api.openai.com/*",
+    "https://api.deepseek.com/*",
+    "https://generativelanguage.googleapis.com/*",
+    "https://openrouter.ai/*"
+  ],
+  "background": {"service_worker": "worker.js"},
+  "content_scripts": [
+    {
+      "matches": ["https://game.granbluefantasy.jp/*", "https://gbf.game.mbga.jp/*"],
+      "js": ["isolated_bridge.js"],
+      "run_at": "document_start",
+      "world": "ISOLATED"
+    },
+    {
+      "matches": ["https://game.granbluefantasy.jp/*", "https://gbf.game.mbga.jp/*"],
+      "js": ["bookmark_seed.js", "gm_page.js", "bookmark_context.js", "gbf-bookmark.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://game.granbluefantasy.jp/*", "https://gbf.game.mbga.jp/*"],
+      "js": ["gbf-translation.js"],
+      "run_at": "document_end",
+      "world": "MAIN"
+    }
+  ]
+}

@@ -1,0 +1,4 @@
+#pragma once
+namespace gbrowser {
+inline constexpr char kStorageProbeJavaScript[] = R"GBPROBE(@STORAGE_PROBE_JS@)GBPROBE";
+}

@@ -1,0 +1,287 @@
+{
+  "data": [
+    {
+      "url": "#mypage",
+      "name": "首页",
+      "index": 3,
+      "background": "#297fc8",
+      "_index": 0
+    },
+    {
+      "name": "共斗",
+      "url": "#coopraid",
+      "background": "#ffeb3b",
+      "index": 4,
+      "_index": 1
+    },
+    {
+      "name": "未确认",
+      "url": "#quest/assist/unclaimed",
+      "background": "#8dc3dd",
+      "index": 5,
+      "_index": 2
+    },
+    {
+      "name": "id",
+      "url": "#quest/assist_entry_id/0",
+      "background": "#ff5722",
+      "index": 6,
+      "parent": 0,
+      "_index": 3
+    },
+    {
+      "url": "#quest/assist",
+      "name": "副本列表",
+      "index": 7,
+      "background": "#c96883",
+      "_index": 4
+    },
+    {
+      "name": "活动副本",
+      "url": "#quest/assist/event",
+      "background": "#297fc8",
+      "index": 8,
+      "parent": 0,
+      "_index": 5
+    },
+    {
+      "name": "Fate",
+      "url": "#quest/fate",
+      "background": "#efb983",
+      "index": 9,
+      "_index": 6
+    },
+    {
+      "url": "#sidestory",
+      "name": "SIDE STORY",
+      "index": 10,
+      "background": "#eee3c8",
+      "_index": 7
+    },
+    {
+      "name": "塔罗首页",
+      "url": "#arcarum2",
+      "background": "#259a80",
+      "index": 11,
+      "parent": 0,
+      "_index": 8
+    },
+    {
+      "name": "地图",
+      "url": "#quest",
+      "background": "#ff9800",
+      "index": 12,
+      "parent": 0,
+      "_index": 9
+    },
+    {
+      "name": "收藏的任务",
+      "url": "none",
+      "background": "#b51e22",
+      "index": 13,
+      "parent": 0,
+      "_index": 10
+    },
+    {
+      "name": "扫荡本",
+      "url": "none",
+      "background": "#8bc34a",
+      "index": 14,
+      "parent": 0,
+      "_index": 11
+    },
+    {
+      "name": "门票",
+      "url": "none",
+      "background": "#a72a2a",
+      "index": 15,
+      "parent": 0,
+      "_index": 12
+    },
+    {
+      "name": "编队",
+      "url": "#party/index/0/npc/0",
+      "background": "#5fc829",
+      "index": 17,
+      "parent": 0,
+      "_index": 13
+    },
+    {
+      "name": "list",
+      "url": "#list",
+      "background": "#eee3c8",
+      "index": 18,
+      "parent": 0,
+      "_index": 14
+    },
+    {
+      "name": "商店",
+      "url": "#shop",
+      "background": "#ff972d",
+      "index": 19,
+      "parent": 0,
+      "_index": 15
+    },
+    {
+      "name": "肉鸽",
+      "url": "https://game.granbluefantasy.jp/#arcarum3",
+      "background": "#ffeb3b",
+      "index": 20,
+      "parent": 0,
+      "_index": 16
+    },
+    {
+      "name": "快捷副本",
+      "url": "https://game.granbluefantasy.jp/#quest/supporter/947621/1/0/10551",
+      "background": "#eee3c8",
+      "index": 21,
+      "parent": 0,
+      "_index": 17
+    },
+    {
+      "name": "火龙",
+      "url": "#quest/supporter/305191/1/0/41",
+      "background": "#8bc34a",
+      "index": 13,
+      "parent": 13,
+      "_index": 18
+    },
+    {
+      "name": "水龙",
+      "url": "#quest/supporter/305201/1/0/42",
+      "background": "#eee3c8",
+      "index": 14,
+      "parent": 13,
+      "_index": 19
+    },
+    {
+      "name": "土龙",
+      "url": "#quest/supporter/305211/1/0/43",
+      "background": "#ff5722",
+      "index": 15,
+      "parent": 13,
+      "_index": 20
+    },
+    {
+      "name": "风龙",
+      "url": "#quest/supporter/305221/1/0/44",
+      "background": "#ff9800",
+      "index": 16,
+      "parent": 13,
+      "_index": 21
+    },
+    {
+      "name": "光龙",
+      "url": "#quest/supporter/305231/1/0/45",
+      "background": "#c96883",
+      "index": 17,
+      "parent": 13,
+      "_index": 22
+    },
+    {
+      "name": "暗龙",
+      "url": "#quest/supporter/305241/1/0/46",
+      "background": "#ffc107",
+      "index": 18,
+      "parent": 13,
+      "_index": 23
+    },
+    {
+      "name": "大巴",
+      "url": "#quest/supporter/301061/1/0/59",
+      "background": "#4caf50",
+      "index": 19,
+      "parent": 13,
+      "_index": 24
+    },
+    {
+      "name": "cb",
+      "url": "#quest/supporter/303141/1/0/136",
+      "background": "#ff5722",
+      "index": 20,
+      "parent": 13,
+      "_index": 25
+    },
+    {
+      "name": "世界",
+      "url": "#quest/supporter/305571/1/0/25070",
+      "background": "#ff5722",
+      "index": 21,
+      "parent": 13,
+      "_index": 26
+    },
+    {
+      "name": "N岛主",
+      "url": "#quest/supporter/305261/28",
+      "background": "#eee3c8",
+      "index": 14,
+      "parent": 14,
+      "_index": 27
+    },
+    {
+      "name": "EX岛主",
+      "url": "#quest/supporter/305441/28/0/18",
+      "background": "#ffc107",
+      "index": 15,
+      "parent": 14,
+      "_index": 28
+    },
+    {
+      "name": "HL岛主",
+      "url": "#quest/supporter/305461/28/0/32",
+      "background": "#eee3c8",
+      "index": 16,
+      "parent": 14,
+      "_index": 29
+    },
+    {
+      "name": "2.0",
+      "url": "#quest/supporter/305561/28/0/522",
+      "background": "#009688",
+      "index": 17,
+      "parent": 14,
+      "_index": 30
+    },
+    {
+      "name": "雅典娜本",
+      "url": "#quest/supporter/305471/28/0/47",
+      "background": "#4caf50",
+      "index": 18,
+      "parent": 14,
+      "_index": 31
+    },
+    {
+      "name": "讨灭",
+      "url": "#quest/supporter/103951/28",
+      "background": "#8bc34a",
+      "index": 19,
+      "parent": 14,
+      "_index": 32
+    },
+    {
+      "name": "六道",
+      "url": "#quest/supporter/103991/28",
+      "background": "#8dc3dd",
+      "index": 20,
+      "parent": 14,
+      "_index": 33
+    },
+    {
+      "name": "星本pro",
+      "url": "#quest/supporter/305301/28",
+      "background": "#c96883",
+      "index": 21,
+      "parent": 14,
+      "_index": 34
+    }
+  ],
+  "config": {
+    "position": "right",
+    "hideDelay": -2,
+    "animation": true,
+    "margin": 100,
+    "size": 3,
+    "align": "left",
+    "mixed": "yes"
+  }
+}

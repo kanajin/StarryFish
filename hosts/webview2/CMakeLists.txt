@@ -1,0 +1,29 @@
+cmake_minimum_required(VERSION 3.21)
+project(GbrowserWebView2 LANGUAGES CXX RC)
+if(NOT WIN32 OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
+  message(FATAL_ERROR "Native Windows x64 required")
+endif()
+if(NOT GBROWSER_HOST_FINGERPRINT MATCHES "^[0-9a-f]+$")
+  message(FATAL_ERROR "Use build.py; host inputs must have a content fingerprint")
+endif()
+add_subdirectory(../../app shared-core)
+add_executable(GbrowserWebView2 WIN32 src/starryfish.rc src/profile_dialog.cpp src/main.cpp src/directory_pin.cpp src/component_catalogue.cpp src/user_state.cpp src/profile_catalogue.cpp src/proxy_preference.cpp)
+add_executable(NativeSourceChecks checks/directory_pin.cpp src/directory_pin.cpp src/component_catalogue.cpp src/user_state.cpp src/profile_catalogue.cpp src/proxy_preference.cpp)
+add_executable(UiThemePreview checks/ui_theme_preview.cpp)
+foreach(target GbrowserWebView2 NativeSourceChecks UiThemePreview)
+  target_compile_features(${target} PRIVATE cxx_std_17)
+  target_compile_options(${target} PRIVATE /utf-8 /W4 /WX /EHsc /cgthreads1)
+  target_compile_definitions(${target} PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN
+    GBROWSER_HOST_FINGERPRINT=${GBROWSER_HOST_FINGERPRINT})
+  set_property(TARGET ${target} PROPERTY MSVC_RUNTIME_LIBRARY MultiThreaded)
+  target_include_directories(${target} PRIVATE src ../../app/src .sdk/1.0.4258.31 .build/generated)
+  target_link_libraries(${target} PRIVATE
+    gbrowser_core
+    bcrypt shell32 ole32 oleaut32 user32 comctl32 version advapi32 shlwapi crypt32)
+endforeach()
+target_link_libraries(UiThemePreview PRIVATE gdiplus dwmapi)
+target_link_libraries(GbrowserWebView2 PRIVATE
+  gdiplus dwmapi
+  "${CMAKE_CURRENT_SOURCE_DIR}/.sdk/1.0.4258.31/WebView2LoaderStatic.lib")
+
+set_target_properties(GbrowserWebView2 PROPERTIES OUTPUT_NAME StarryFish)

@@ -1,0 +1,7 @@
+#pragma once
+namespace gbrowser {
+// Generated from the same JSON shipped beside Gbrowser.exe. Chunking avoids
+// MSVC's individual literal limit without changing the imported bytes.
+inline constexpr char kInitialProxyOptions[] =
+@PROXY_INITIAL_CPP@;
+}

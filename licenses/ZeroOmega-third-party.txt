@@ -1,0 +1,267 @@
+ZeroOmega 3.5.2 third-party license headers
+
+Unmodified package license files and AUTHORS remain in Components/zeroomega.
+Full upstream corresponding source is provided beside the installer.
+
+js/omega_pac.min.js
+/*!
+ * The buffer module from node.js, for the browser.
+ *
+ * @author   Feross Aboukhadijeh <http://feross.org>
+ * @license  MIT
+ */
+
+js/omega_target.min.js
+/* @preserve
+ * The MIT License (MIT)
+ * 
+ * Copyright (c) 2013-2015 Petka Antonov
+ * 
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ * 
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ * 
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ * THE SOFTWARE.
+ * 
+ */
+
+js/omega_webext_proxy_script.min.js
+/*!
+ * The buffer module from node.js, for the browser.
+ *
+ * @author   Feross Aboukhadijeh <http://feross.org>
+ * @license  MIT
+ */
+
+lib/angular/angular.min.js
+/*
+ AngularJS v1.8.3
+ (c) 2010-2020 Google LLC. http://angularjs.org
+ License: MIT
+*/
+
+lib/angular-animate/angular-animate.min.js
+/*
+ AngularJS v1.7.9
+ (c) 2010-2018 Google, Inc. http://angularjs.org
+ License: MIT
+*/
+
+lib/angular-bootstrap/ui-bootstrap-tpls.min.js
+/*
+ * angular-ui-bootstrap
+ * http://angular-ui.github.io/bootstrap/
+
+ * Version: 0.12.1 - 2015-02-20
+ * License: MIT
+ */
+
+lib/angular-loader/angular-loader.min.js
+/*
+ AngularJS v1.7.9
+ (c) 2010-2018 Google, Inc. http://angularjs.org
+ License: MIT
+*/
+
+lib/angular-sanitize/angular-sanitize.min.js
+/*
+ AngularJS v1.7.9
+ (c) 2010-2018 Google, Inc. http://angularjs.org
+ License: MIT
+*/
+
+lib/angular-ui-router/angular-ui-router.min.js
+/**
+ * State-based routing for AngularJS
+ * @version v0.2.18
+ * @link http://angular-ui.github.com/
+ * @license MIT License, http://www.opensource.org/licenses/MIT
+ */
+
+lib/angular-ui-sortable/sortable.min.js
+/**
+ * angular-ui-sortable - This directive allows you to jQueryUI Sortable.
+ * @version v0.13.4 - 2015-06-07
+ * @link http://angular-ui.github.com
+ * @license MIT
+ */
+
+lib/angular-ui-utils/validate.min.js
+/**
+ * angular-ui-utils - Swiss-Army-Knife of AngularJS tools (with no external dependencies!)
+ * @version v0.2.3 - 2015-06-30
+ * @link http://angular-ui.github.com
+ * @license MIT License, http://www.opensource.org/licenses/MIT
+ */
+
+lib/blob/Blob.js
+/* Blob.js
+ * A Blob, File, FileReader & URL implementation.
+ * 2019-04-19
+ *
+ * By Eli Grey, http://eligrey.com
+ * By Jimmy Wärting, https://github.com/jimmywarting
+ * License: MIT
+ *   See https://github.com/eligrey/Blob.js/blob/master/LICENSE.md
+ */
+
+lib/bootstrap/css/bootstrap.min.css
+/*!
+ * Bootstrap v3.3.7 (http://getbootstrap.com)
+ * Copyright 2011-2016 Twitter, Inc.
+ * Licensed under MIT (https://github.com/twbs/bootstrap/blob/master/LICENSE)
+ */
+
+lib/bootstrap/js/dropdown.js
+/* ========================================================================
+ * Bootstrap: dropdown.js v3.3.7
+ * http://getbootstrap.com/javascript/#dropdowns
+ * ========================================================================
+ * Copyright 2011-2016 Twitter, Inc.
+ * Licensed under MIT (https://github.com/twbs/bootstrap/blob/master/LICENSE)
+ * ======================================================================== */
+
+lib/jquery/jquery.min.js
+/*! jQuery v3.7.1 | (c) OpenJS Foundation and other contributors | jquery.org/license */
+
+lib/jqueryui-touch-punch/jquery.ui.touch-punch.min.js
+/*!
+ * jQuery UI Touch Punch 0.2.3
+ *
+ * Copyright 2011–2014, Dave Furfero
+ * Dual licensed under the MIT or GPL Version 2 licenses.
+ *
+ * Depends:
+ *  jquery.ui.widget.js
+ *  jquery.ui.mouse.js
+ */
+
+lib/ladda/ladda-themeless.min.css
+/*!
+ * Ladda
+ * http://lab.hakim.se/ladda
+ * MIT licensed
+ *
+ * Copyright (C) 2015 Hakim El Hattab, http://hakim.se
+ */
+
+lib/ladda/ladda.min.js
+/*!
+ * Ladda 0.9.8 (2015-03-19, 17:22)
+ * http://lab.hakim.se/ladda
+ * MIT licensed
+ *
+ * Copyright (C) 2015 Hakim El Hattab, http://hakim.se
+ */
+
+lib/ngprogress/ngProgress.min.js
+/*
+ngProgress 1.0.7 - slim, site-wide progressbar for AngularJS 
+(C) 2013 - Victor Bjelkholm 
+License: MIT 
+Source: https://github.com/VictorBjelkholm/ngProgress 
+Date Compiled: 2014-09-26 
+*/
+
+lib/script.js/script.min.js
+/*!
+  * $script.js JS loader & dependency manager
+  * https://github.com/ded/script.js
+  * (c) Dustin Diaz 2014 | License MIT
+  */
+
+lib/spectrum/spectrum.css
+/***
+Spectrum Colorpicker v1.8.1
+https://github.com/bgrins/spectrum
+Author: Brian Grinstead
+License: MIT
+***/
+
+lib/spectrum/spectrum.js
+// Spectrum Colorpicker v1.8.1
+// https://github.com/bgrins/spectrum
+// Author: Brian Grinstead
+// License: MIT
+
+lib/spin.js/spin.js
+/**
+ * Copyright (c) 2011-2014 Felix Gnass
+ * Licensed under the MIT license
+ */
+
+lib/zero-dependencies/filesize/filesize.esm.js
+/**
+ * filesize
+ *
+ * @copyright 2023 Jason Mulligan <jason.mulligan@avoidwork.com>
+ * @license BSD-3-Clause
+ * @version 10.0.7
+ */
+
+lib/zero-dependencies/jquery-ui/jquery-ui-1.10.4.custom.min.js
+/*! jQuery UI - v1.10.4 - 2014-05-25
+* http://jqueryui.com
+* Includes: jquery.ui.core.js, jquery.ui.widget.js, jquery.ui.mouse.js, jquery.ui.sortable.js
+* Copyright 2014 jQuery Foundation and other contributors; Licensed MIT */
+
+lib/zero-dependencies/jszip/jszip.min.js
+/*!
+
+JSZip v3.10.1 - A JavaScript class for generating and reading zip files
+<http://stuartk.com/jszip>
+
+(c) 2009-2016 Stuart Knightley <stuart [at] stuartk.com>
+Dual licenced under the MIT license or GPLv3. See https://raw.github.com/Stuk/jszip/main/LICENSE.markdown.
+
+JSZip uses the library pako released under the MIT license :
+https://github.com/nodeca/pako/blob/main/LICENSE
+*/
+
+lib/zero-dependencies/toastify/toastify-es.js
+/*!
+ * Toastify js 1.12.0
+ * https://github.com/apvarun/toastify-js
+ * @license MIT licensed
+ *
+ * Copyright (C) 2018 Varun A P
+ */
+
+lib/zero-dependencies/toastify/toastify.css
+/*!
+ * Toastify js 1.12.0
+ * https://github.com/apvarun/toastify-js
+ * @license MIT licensed
+ *
+ * Copyright (C) 2018 Varun A P
+ */
+
+popup/css/dialog.css
+/*!
+ * Copyright 2017 The SwitchyOmega Authors. Please see the AUTHORS file
+ * for details.
+ * Based on Bootstrap v3.3.2 (http://getbootstrap.com)
+ * Copyright 2011-2015 Twitter, Inc.
+ * Licensed under MIT (https://github.com/twbs/bootstrap/blob/master/LICENSE)
+*/
+
+popup/css/index.css
+/*!
+ * Copyright 2017 The SwitchyOmega Authors. Please see the AUTHORS file
+ * for details.
+ * Based on Bootstrap v3.3.2 (http://getbootstrap.com)
+ * Copyright 2011-2015 Twitter, Inc.
+ * Licensed under MIT (https://github.com/twbs/bootstrap/blob/master/LICENSE)
+*/

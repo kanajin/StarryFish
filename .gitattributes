@@ -1,0 +1,2 @@
+# Preserve pinned script bytes and identical source fingerprints across hosts.
+* -text
