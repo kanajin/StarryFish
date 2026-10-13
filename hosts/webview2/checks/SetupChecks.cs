@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
+using System.Net;
 using System.Text;
 
 namespace Gbrowser.Setup {
@@ -118,9 +119,49 @@ internal static class SetupChecks {
             Paths.WriteNew(Path.Combine(root, "wrong-root", "component-catalogue.bin"), envelope);
             ManualChecks(root, Paths.Local(args[1]), valid);
             UpdateChecks(root, Paths.Local(args[1]), valid);
+            FirstPublicationChecks(root);
+            SystemProxyChecks();
+            IntegrationChecks(root, Paths.Local(args[1]), valid);
             File.WriteAllText(Path.Combine(root, "result.txt"), "PASS " + passed + " setup source/archive/filesystem boundary checks\nNO_NETWORK_INSTALL_BROWSER_PROFILE\n");
             Console.WriteLine("PASS " + passed + " setup source/archive/filesystem boundary checks; network/install/browser NOT_RUN"); return 0;
         } catch (Exception error) { Console.Error.WriteLine("FAIL setup source checks: " + error.Message); return 1; }
+    }
+    static void IntegrationChecks(string root, string payload, CheckedPackage component) {
+        var application = Path.Combine(root, "UninstallFixture"); Fixture(application, payload, component);
+        Paths.WriteNew(Path.Combine(application, ApplicationOwner.Name), ApplicationOwner.Encode(application, SetupInputs.HostFingerprint, ApplicationUpdate.CurrentFiles()));
+        Rules.Need(SetupOptions.ValidateDestination(application) == application, "Existing owned destination"); ++passed;
+        var empty = Path.Combine(root, "ChosenEmpty"); Directory.CreateDirectory(empty);
+        Rules.Need(SetupOptions.ValidateDestination(empty) == empty, "Chosen empty destination"); ++passed;
+        Installer.StageAndPublish(empty, staging => Paths.WriteNew(Path.Combine(staging, "fixture.txt"), new byte[] { 1 })); ++passed;
+        Reject(() => SetupOptions.ValidateDestination(empty), "Do not overwrite unrelated directory");
+        Reject(() => SetupOptions.ValidateDestination(Path.GetPathRoot(root)), "No drive root install");
+        foreach (var choice in new[] { "acgpower", "island", "direct" }) { SetupOptions.ValidateProxy(choice); ++passed; }
+        Reject(() => SetupOptions.ValidateProxy("unknown"), "Unknown install proxy");
+        // Even unknown files inside component/evidence folders are not ours.
+        var extra = Path.Combine(application, "Components", "tarou", "my-note.txt"); Paths.WriteNew(extra, new byte[] { 9 });
+        var evidence = Path.Combine(application, "InstallEvidence", "my-note.txt"); Paths.WriteNew(evidence, new byte[] { 9 });
+        Integration.Capture(application);
+        var inventory = File.ReadAllBytes(Path.Combine(application, Integration.Inventory));
+        var members = Integration.Decode(application, inventory);
+        Rules.Need(!members.Any(file => file.Name.EndsWith("my-note.txt", StringComparison.Ordinal)), "Unknown additions claimed by uninstall"); ++passed;
+        Reject(() => Integration.Decode(Path.Combine(root, "WrongInstall"), inventory), "Inventory bound to root");
+        Reject(() => Integration.Encode(application, Enumerable.Repeat(members[0], 8193).ToArray()), "Inventory write count bound");
+        var changed = Path.Combine(application, "StarryFish.exe"); File.WriteAllBytes(changed, new byte[] { 8 });
+        using (var running = new Paths()) {
+            running.ExclusiveApplication(application); Reject(() => Integration.RemoveOwned(application), "Uninstall excludes running browser");
+        }
+        var shortcut = Path.Combine(root, "SyntheticShortcut.lnk");
+        System.Threading.Tasks.Task.Run(() => Integration.Shortcut(shortcut, changed, "--uninstall")).GetAwaiter().GetResult();
+        Rules.Need(File.Exists(shortcut) && new FileInfo(shortcut).Length > 0, "Worker thread shortcut creation"); ++passed;
+        using (var lockedInventory = new FileStream(Path.Combine(application, Integration.Inventory), FileMode.Open, FileAccess.Read, FileShare.Read)) {
+            Rules.Need(Integration.FinishCleanup(application).Length > 0, "Final cleanup lock incorrectly treated as failure"); ++passed;
+        }
+        Integration.RemoveOwned(application);
+        Rules.Need(File.Exists(extra) && File.Exists(evidence) && File.ReadAllBytes(changed).SequenceEqual(new byte[] { 8 }), "Uninstall removed unknown/modified file"); ++passed;
+        Rules.Need(!File.Exists(Path.Combine(application, "WebView2-SDK-LICENSE.txt")), "Uninstall left unmodified owned file"); ++passed;
+        var syntheticData = Path.Combine(root, "DeleteDataFixture"); Directory.CreateDirectory(Path.Combine(syntheticData, "Nested"));
+        File.WriteAllText(Path.Combine(syntheticData, "Nested", "synthetic.txt"), "synthetic only");
+        Integration.DeleteDataTree(syntheticData); Rules.Need(!Directory.Exists(syntheticData), "Explicit data deletion"); ++passed;
     }
     static string Fixture(string application, string payload, CheckedPackage arcarum) {
         application = Paths.Local(application); Directory.CreateDirectory(application);
@@ -191,6 +232,57 @@ internal static class SetupChecks {
             catch (ManualCommitOutcome error) { unknown = error.Outcome == "PUBLICATION_OUTCOME_UNKNOWN"; }
         }
         Rules.Need(unknown && File.Exists(pending) && File.ReadAllBytes(gate).SequenceEqual(committed), "Failed publication was replayed or misreported"); ++passed;
+    }
+    static void SystemProxyChecks() {
+        // Replace only this isolated check process's default proxy. No Windows
+        // settings, credentials, PAC downloads or network requests are involved.
+        var previous = WebRequest.DefaultWebProxy;
+        try {
+            var configured = new WebProxy("http://127.0.0.1:18473", false,
+                new[] { @"^https://codeload\.github\.com(?::443)?(?:/|$)" });
+            WebRequest.DefaultWebProxy = configured;
+            foreach (var host in new[] { "api.github.com", "github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com", "codeload.github.com" }) {
+                var address = new Uri("https://" + host + "/fixture");
+                var query = PublicSource.DownloadRequest(address);
+                Rules.Need(query.Proxy != null && query.Proxy.GetProxy(address) == configured.GetProxy(address) &&
+                    query.Proxy.IsBypassed(address) == (host == "codeload.github.com"), "Download ignored default proxy/bypass rule: " + host);
+                Rules.Need(!query.AllowAutoRedirect && query.Credentials == null && query.Proxy.Credentials == null, "Proxy change enabled redirects or credentials");
+                query.Abort(); ++passed;
+            }
+            WebRequest.DefaultWebProxy = null;
+            var direct = PublicSource.DownloadRequest(new Uri("https://github.com/fixture"));
+            Rules.Need(direct.Proxy == null, "No-proxy environment no longer uses direct request");
+            direct.Abort(); ++passed;
+        } finally { WebRequest.DefaultWebProxy = previous; }
+    }
+    static void FirstPublicationChecks(string root) {
+        var parent = Path.Combine(root, "first-publish");
+        var destination = Path.Combine(parent, "Product");
+        string staged = null;
+        Installer.StageAndPublish(destination, staging => {
+            staged = staging;
+            Paths.WriteNew(Path.Combine(staging, "Components", "fixture", "worker.js"), new byte[] { 1, 2, 3 });
+            // Reproduce the old lifetime bug: a pinned staging directory cannot
+            // be renamed even when there is no other process using the product.
+            Reject(() => Directory.Move(staging, destination), "staging pin blocks premature publication");
+            Reject(() => Directory.Move(parent, parent + "-moved"), "parent stays pinned during preparation");
+        });
+        Rules.Need(!Directory.Exists(staged) && File.ReadAllBytes(Path.Combine(destination, "Components", "fixture", "worker.js")).SequenceEqual(new byte[] { 1, 2, 3 }), "First publication did not preserve prepared bytes"); ++passed;
+        bool prepared = false;
+        Reject(() => Installer.StageAndPublish(destination, staging => { prepared = true; }), "first install cannot replace existing product");
+        Rules.Need(!prepared, "Existing product ran preparation"); ++passed;
+        var failed = Path.Combine(parent, "Failed");
+        Reject(() => Installer.StageAndPublish(failed, staging => {
+            staged = staging; Paths.WriteNew(Path.Combine(staging, "evidence.txt"), new byte[] { 7 });
+            throw new IOException("Synthetic preparation failure");
+        }), "failed preparation must not publish");
+        Rules.Need(!Directory.Exists(failed) && File.Exists(Path.Combine(staged, "evidence.txt")), "Failed staging was lost or published"); ++passed;
+        var collision = Path.Combine(parent, "Collision");
+        Reject(() => Installer.StageAndPublish(collision, staging => {
+            staged = staging; Paths.WriteNew(Path.Combine(staging, "prepared.txt"), new byte[] { 8 });
+            Paths.WriteNew(collision, new byte[] { 9 });
+        }), "destination appearing during preparation is preserved");
+        Rules.Need(File.ReadAllBytes(collision).SequenceEqual(new byte[] { 9 }) && File.Exists(Path.Combine(staged, "prepared.txt")), "Collision replaced destination or removed staging"); ++passed;
     }
     static void UpdateChecks(string root, string payload, CheckedPackage arcarum) {
         var application = Fixture(Path.Combine(root, "u"), payload, arcarum);

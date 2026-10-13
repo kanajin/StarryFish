@@ -124,6 +124,16 @@ internal static class PublicSource {
         Rules.Need(value.Scheme == "https" && hosts.Contains(value.Host, StringComparer.Ordinal) &&
             value.Port == 443 && value.UserInfo == "" && value.Fragment == "", "Source HTTPS host/redirect rejected"); return value;
     }
+    internal static HttpWebRequest DownloadRequest(Uri address) {
+        // Leave Proxy unset: .NET Framework uses the current user's Internet
+        // Options proxy, including its automatic configuration and bypass rules.
+        // Each allowed redirect creates its own request, so rules apply to its host.
+        var query = (HttpWebRequest)WebRequest.Create(address); query.Method = "GET";
+        query.AllowAutoRedirect = false; query.Timeout = 15000; query.ReadWriteTimeout = 15000;
+        query.UserAgent = "StarryFish-FirstInstall"; query.Headers[HttpRequestHeader.AcceptEncoding] = "identity";
+        query.Accept = address.Host == "api.github.com" ? "application/vnd.github+json" : "application/octet-stream";
+        return query;
+    }
     internal static byte[] Fetch(string text, int limit) {
         // Follow Windows TLS policy; no old framework default protocol pin,
         // certificate callback, browser credentials or trust-store changes.
@@ -132,10 +142,7 @@ internal static class PublicSource {
         var address = Url(text, new[] { "api.github.com", "github.com", "codeload.github.com" });
         var started = System.Diagnostics.Stopwatch.StartNew();
         for (int redirect = 0; redirect <= 4; ++redirect) {
-            var query = (HttpWebRequest)WebRequest.Create(address); query.Method = "GET"; query.Proxy = null;
-            query.AllowAutoRedirect = false; query.Timeout = 15000; query.ReadWriteTimeout = 15000;
-            query.UserAgent = "Gbrowser-FirstInstall"; query.Headers[HttpRequestHeader.AcceptEncoding] = "identity";
-            query.Accept = address.Host == "api.github.com" ? "application/vnd.github+json" : "application/octet-stream";
+            var query = DownloadRequest(address);
             HttpWebResponse response;
             try { response = (HttpWebResponse)query.GetResponse(); }
             catch (WebException error) {
@@ -146,7 +153,7 @@ internal static class PublicSource {
             }
             using (response) {
                 var code = (int)response.StatusCode;
-                Rules.Need(started.Elapsed.TotalSeconds <= 90, "Source time budget exceeded");
+                Rules.Need(started.Elapsed.TotalSeconds <= 90, "下载总耗时超过 90 秒，请检查网络或系统代理设置。");
                 if (code == 301 || code == 302 || code == 303 || code == 307 || code == 308) {
                     Rules.Need(redirect < 4, "Source redirect budget exceeded");
                     var location = response.Headers[HttpResponseHeader.Location];
@@ -161,7 +168,8 @@ internal static class PublicSource {
                 using (var input = response.GetResponseStream()) using (var output = new MemoryStream()) {
                     var chunk = new byte[65536]; int count;
                     while ((count = input.Read(chunk, 0, Math.Min(chunk.Length, limit - (int)output.Length + 1))) != 0) {
-                        Rules.Need(started.Elapsed.TotalSeconds <= 90 && output.Length + count <= limit, "Actual download budget exceeded"); output.Write(chunk, 0, count);
+                        Rules.Need(started.Elapsed.TotalSeconds <= 90, "下载总耗时超过 90 秒，请检查网络或系统代理设置。");
+                        Rules.Need(output.Length + count <= limit, "实际下载大小超过允许值，已停止接收文件。"); output.Write(chunk, 0, count);
                     }
                     Rules.Need(response.ContentLength < 0 || output.Length == response.ContentLength, "Truncated source response"); return output.ToArray();
                 }

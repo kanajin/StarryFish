@@ -10,12 +10,12 @@
 
 ## 下载与安装
 
-在 [Releases](https://github.com/kanajin/StarryFish/releases/latest) 下载 **StarryFish-版本-windows-x64-setup.zip**，完整解压后运行 **StarryFishSetup.exe**。不要只取出其中一个 EXE。
+在 [Releases](https://github.com/kanajin/StarryFish/releases/latest) 下载 **StarryFish-版本-windows-x64-setup.exe**，直接运行单个安装器，无需解压。
 
 - Windows 10/11 x64；需要 Microsoft .NET Framework 4.8，以及 **稳定版 WebView2 Runtime 154 或更高**。安装器会检查版本，缺失时停止并提示；[微软官方下载](https://developer.microsoft.com/microsoft-edge/webview2/)。
-- 安装过程需要网络，自动从上游获取太郎、肉鸽并加载；ZeroOmega 使用固定版本随包提供。
-- 安装到当前用户 `%LOCALAPPDATA%/Programs/StarryFish/Product`，无需管理员权限。安装完成后启动 `StarryFish.exe`；可以自行为它创建桌面快捷方式。
-- 先自行启动 acgpower，再在浏览器代理菜单选择对应配置；确认生效后进入 GBF。浏览器不提供代理服务。Mobage 登录、验证码由本人处理。
+- 安装过程需要网络，自动从上游获取太郎、肉鸽并加载；ZeroOmega 使用固定版本随包提供。安装器遵循当前 Windows 用户的系统代理及绕过规则，请先启用代理客户端的“系统代理”，再启动安装器；浏览器内的 ZeroOmega 配置不控制安装器。
+- 安装向导中选择安装路径（必须可写且为空，或已有本程序安装）；创建当前用户开始菜单快捷方式，安装后可按 Win+S 搜索 **StarryFish**。已有安装更新时保持原路径。
+- 安装时选择 **acgpower / 岛风go / 直连**。使用加速器时先启动并启用它；新资料首次启动按此选择核对实际配置，再进入 GBF。已有资料保留自己的成功选择。浏览器不提供代理服务。Mobage 登录、验证码由本人处理。
 - 首发包未做商业代码签名；可用 Release 的 `SHA256SUMS.txt` 核对下载完整性。不要关闭系统安全功能。
 - 首版使用独立 StarryFish 资料，不自动读取或迁移旧 Gbrowser 开发版的登录态和配置。旧目录保留。
 
@@ -28,14 +28,19 @@
 - 太郎与肉鸽侧栏支持开关、分隔调整及拆出窗口。
 - 内置书签、汉化；支持书签右键设置、中键新标签。
 - 可隐藏 Moba 栏和副窗右侧游戏菜单；支持正常网页下载。
+- 静态资源缓存：三点菜单可开关、查看命中和清理；资源放在程序旁的 `Cache/Static-v1`，容量上限 10 GiB；超过一周未命中的资源自动清理，命中时间跨重启保留。只复用服务器允许且未过期的公开 GBF 资源，不缓存账号或游戏接口。实际增量加速效果尚未测量。
 
 不包含 Chrome Web Store、通用油猴管理器、游戏自动操作或自动更新器。助手默认绑定固定主 GBF 标签。
 
 ## 更新
 
-关闭浏览器后，从新版本解压目录运行 `StarryFishSetup.exe --upgrade`，显式更新本体，保留当前安装路径、组件及资料。首次安装与更新不会静默覆盖未知状态。
+关闭浏览器后，运行新版单 EXE 安装器，或给安装器加 `--upgrade` 参数，显式更新本体，保留当前安装路径、组件及资料。首次安装与更新不会静默覆盖未知状态。
 
-太郎与肉鸽后续仍由本人从上游下载，覆盖安装目录中 `Components/tarou`、`Components/arcarum-dungeon` 的原位置；关闭浏览器后从与当前本体对应的安装包运行 `StarryFishSetup.exe --reload-helpers`，通过检查后下次启动加载。保留包的原始目录结构，不要在目录内放混杂旧文件。
+太郎与肉鸽后续仍由本人从上游下载，覆盖安装目录中 `Components/tarou`、`Components/arcarum-dungeon` 的原位置；关闭浏览器后从与当前本体对应的安装包运行该版本的单 EXE 安装器并加 `--reload-helpers` 参数，通过检查后下次启动加载。保留包的原始目录结构，不要在目录内放混杂旧文件。
+
+## 卸载
+
+先正常关闭 StarryFish，再从 Windows“已安装的应用”、Geek 的程序列表或开始菜单“卸载 StarryFish”进入卸载向导。登记采用当前用户标准卸载项；Geek 列表显示尚待实际反馈。默认保留登录态与个人配置；只有勾选“同时删除个人数据”并确认才删除此安装的资料。额外添加或修改的文件保留，不删除其他安装的资料。安装器维护缓存及旧版本的诊断证据可能保留。
 
 ## 隐私与联网
 
@@ -55,7 +60,7 @@ python -B build.py test
 python -B build.py verify
 python -B build.py package-setup
 cd ../..
-python -B tools/package_release.py 0.1.0
+python -B tools/package_release.py 0.1.4
 ```
 
 依赖从官方固定 URL 获取并验证 SHA256。太郎/肉鸽固定快照仅用于构建检查；终端用户首装仍解析上游最新版本。包输出在 `dist/`。推送 `main` 会构建并保留检查产物，推送 `v*` 标签会额外发布 GitHub Release；工作流不会访问或上传本地用户资料。发布新版本前需同时更新 `VERSION` 与 `RELEASE_NOTES.md`，标签版本必须与 `VERSION` 一致。

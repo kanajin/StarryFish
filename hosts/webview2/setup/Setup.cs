@@ -141,6 +141,9 @@ internal static class Catalogue {
 
 internal static class Installer {
     internal static string Destination() {
+        return Integration.Registered() ?? DefaultDestination();
+    }
+    internal static string DefaultDestination() {
         // Product is distinct from the historical Candidate snapshot, which is
         // intentionally retained and never silently upgraded or migrated.
         return Paths.Local(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -199,18 +202,35 @@ internal static class Installer {
             }
         }
     }
-    internal static string Install(string package, Action<string> progress = null) {
+    internal static void StageAndPublish(string destination, Action<string> prepare) {
+        Paths.Local(destination);
+        var parent = Paths.Local(Path.GetDirectoryName(destination));
+        var staging = Paths.Local(Path.Combine(parent, ".install-" + Guid.NewGuid().ToString("N")));
+        using (var parentGuards = new Paths()) {
+            parentGuards.CreateTree(parent);
+            if (Directory.Exists(destination) && !Directory.EnumerateFileSystemEntries(destination).Any()) Directory.Delete(destination, false);
+            Paths.RequireMissing(destination);
+            // Keep ancestors pinned throughout publication, but release the
+            // staging directory's no-delete handle before renaming that directory.
+            using (var stagingGuards = new Paths()) {
+                stagingGuards.CreateTree(staging);
+                prepare(staging);
+            }
+            Paths.Local(staging); Paths.RequireMissing(destination);
+            Directory.Move(staging, destination); // Same volume, no replacement; failures retain staging.
+        }
+    }
+    internal static string Install(string package, SetupOptions options, Action<string> progress = null) {
         Inspect(package);
         Prerequisites.Check(); // Stop before downloading or creating staging.
         var local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData); Paths.Local(local);
-        var parent = Paths.Local(Path.Combine(local, "Programs", "StarryFish"));
         // Keep path-derived extension IDs stable for the later explicit manual
         // overwrite/reload workflow. A second first install still cannot reset it.
-        var destination = Destination();
-        Rules.Need(!Directory.Exists(destination) && !File.Exists(destination), "Existing installation retained; no overwrite or reset");
-        var staging = Paths.Local(Path.Combine(parent, ".install-" + Guid.NewGuid().ToString("N")));
-        using (var parentGuards = new Paths()) using (var packageGuards = new Paths()) {
-            parentGuards.CreateTree(parent); parentGuards.CreateTree(staging); packageGuards.Ancestors(package);
+        var destination = SetupOptions.ValidateDestination(options.Destination); SetupOptions.ValidateProxy(options.Proxy);
+        Rules.Need((!Directory.Exists(destination) || !Directory.EnumerateFileSystemEntries(destination).Any()) && !File.Exists(destination), "Existing installation retained; no overwrite or reset");
+        using (var packageGuards = new Paths()) {
+            packageGuards.Ancestors(package);
+            StageAndPublish(destination, staging => {
             Console.WriteLine("Installing to a new current-user directory; existing CEF/profiles retained.");
             var components = new List<CheckedPackage> { FixedZero(package, packageGuards) };
             foreach (var role in new[] { "tarou", "arcarum-dungeon" }) {
@@ -223,6 +243,7 @@ internal static class Installer {
                 PublishComponent(staging, role, checkedPackage); Record(staging, role, source, bytes, checkedPackage); components.Add(checkedPackage);
             }
             PublishComponent(staging, "zeroomega", components[0]);
+            Paths.WriteNew(Path.Combine(staging, "install-choice.state"), Encoding.ASCII.GetBytes("GBWV-INSTALL-1\n" + options.Proxy + "\n"));
             if (progress != null) progress("正在核对程序文件并完成安装…");
             using (var stageGuards = new Paths()) {
                 stageGuards.Ancestors(staging);
@@ -237,9 +258,9 @@ internal static class Installer {
                 Paths.WriteNew(Path.Combine(staging, "InstallEvidence", "application.json"), Encoding.ASCII.GetBytes(
                     "{\"input_fingerprint\":" + Json.Quote(SetupInputs.HostFingerprint) + ",\"loading\":\"NOT_PERFORMED\"}\n"));
             }
-            Paths.Local(staging); Paths.Local(destination);
-            Directory.Move(staging, destination); // Atomic same-volume publication; never overwrites.
+            });
         }
+        Integration.Capture(destination, true);
         Console.WriteLine("Source files ready. Native loading will be performed by the new candidate: " + destination);
         return destination;
     }
@@ -248,27 +269,33 @@ internal static class Program {
     [STAThread]
     static int Main(string[] args) {
         // Keep exact CLI commands headless. Double-clicked installs retain a
-        // readable terminal result instead of losing their console on failure.
-        return args.Length == 0 ? SetupWindow.Run(progress => Execute(args, progress)) : Execute(args).Code;
+        // readable result window; exact maintenance commands remain available.
+        if (args.Length == 1 && args[0] == "--uninstall") return SetupWindow.Run((options, progress) => Integration.Uninstall(false), true);
+        return args.Length == 0 ? SetupWindow.Run((options, progress) => Execute(args, progress, options)) : Execute(args).Code;
     }
-    internal static SetupResult Execute(string[] args, Action<string> progress = null) {
+    internal static SetupResult Execute(string[] args, Action<string> progress = null, SetupOptions options = null) {
         string phase = "CHECK_PACKAGE";
         string destination = null;
         try {
             Rules.Need(args.Length == 0 || (args.Length == 1 && (args[0] == "--inspect" || args[0] == "--no-launch" || args[0] == "--reload-helpers" || args[0] == "--upgrade")), "Use setup directly, exact --inspect, --no-launch, --reload-helpers or --upgrade");
-            var package = Paths.Local(AppDomain.CurrentDomain.BaseDirectory.TrimEnd('\\'));
+            var package = EmbeddedPackage.Open();
             if (args.Length == 1 && args[0] == "--reload-helpers") {
                 phase = "ACCEPT_MANUALLY_REPLACED_HELPERS"; Installer.Inspect(package);
                 ManualReload.Accept(Installer.Destination()); return new SetupResult(0, "助手源树已核对，下一次启动使用正式接口加载。");
             }
             if (args.Length == 1 && args[0] == "--inspect") { Installer.Inspect(package); Console.WriteLine("PASS fixed setup inventory; no network/install/browser/profile performed"); return new SetupResult(0, "安装包文件核对完成；未安装或启动。"); }
-            destination = Installer.Destination();
-            bool existing = Directory.Exists(destination);
+            destination = options == null ? Installer.Destination() : SetupOptions.ValidateDestination(options.Destination);
+            var registered = Integration.Registered();
+            Rules.Need(registered == null || registered.Equals(destination, StringComparison.OrdinalIgnoreCase), "已有其他位置的安装，请先卸载后再改变安装路径。");
+            bool existing = File.Exists(Path.Combine(destination, ApplicationOwner.Name));
             if (args.Length == 1 && args[0] == "--upgrade") Rules.Need(existing, "Product installation required for explicit upgrade");
             phase = existing ? "EXPLICIT_APPLICATION_UPDATE" : "FIRST_INSTALL";
             if (progress != null) progress(existing ? "正在维护程序文件，保留助手和资料…" : "正在核对首次安装条件…");
-            if (existing) ApplicationUpdate.Apply(package, destination); else destination = Installer.Install(package, progress);
+            if (!existing) Rules.Need(options != null, "首次安装请直接打开安装器，先选择位置和游戏连接方式。");
+            if (existing) ApplicationUpdate.Apply(package, destination); else destination = Installer.Install(package, options, progress);
+            phase = "REGISTER_APPLICATION"; Integration.Register(destination);
             if (args.Length == 1) { Console.WriteLine("Installation maintenance complete; browser NOT_STARTED."); return new SetupResult(0, "程序文件已就绪；浏览器未启动。"); }
+            if (options != null && !options.Launch) return new SetupResult(0, "安装完成，可按 Win+S 搜索 StarryFish。\r\n安装位置：" + destination + "\r\n在 Windows 已安装的应用中可卸载。");
             phase = "START_NATIVE_CANDIDATE";
             if (progress != null) progress("程序文件已就绪，正在启动 StarryFish…");
             // No credentials, profile migration, forced permissions or browser
@@ -277,7 +304,7 @@ internal static class Program {
             var process = Process.Start(new ProcessStartInfo { FileName = Path.Combine(destination, "StarryFish.exe"), WorkingDirectory = destination, UseShellExecute = false });
             Rules.Need(process != null, "Native candidate did not start"); process.Dispose();
             return new SetupResult(0, "程序文件已安装在：\r\n" + destination +
-                "\r\n\r\n已请求启动 StarryFish；首次运行和组件加载结果请查看浏览器中的提示。\r\n请先自行启动 acgpower，再在浏览器选择代理。登录由本人处理。");
+                "\r\n\r\n已请求启动 StarryFish，也可按 Win+S 搜索打开。\r\n在 Windows 已安装的应用中可卸载。\r\n首次游戏连接按安装时的选择核对，登录由本人处理。");
         } catch (ManualCommitOutcome error) {
             Console.Error.WriteLine("MANUAL_RELOAD " + error.Message);
             return new SetupResult(3, "助手维护结果需要核对：" + error.Message + "\r\n保留现场，不自动重试或回滚。");

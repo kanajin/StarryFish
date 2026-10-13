@@ -5,6 +5,7 @@
 #include "tab_slots.h"
 #include "compact_chrome.h"
 #include <array>
+#include <string_view>
 
 namespace gbrowser::webview {
 // Owned pane teardown must not re-enter the host's main-window dispatcher.
@@ -41,6 +42,11 @@ inline int SecondaryMenuCut(const PaneState& state, unsigned dpi, int game) {
   if (!state.dual || !state.secondary_menu_hidden) return 0;
   return (std::clamp)(MulDiv(state.secondary_menu_width, static_cast<int>(dpi),
       static_cast<int>(state.secondary_menu_dpi)), 0, (std::max)(0, game - UiPixels(160, dpi)));
+}
+inline int RetainedGameInset(int inset, std::string_view source) {
+  // Exactly the display adapter's origin; Mobage login is not a game viewport.
+  constexpr std::string_view origin = "https://game.granbluefantasy.jp/";
+  return source.substr(0, origin.size()) == origin ? inset : 0;
 }
 inline RECT GameViewBounds(const Rect& frame, int cropped) {
   // RECT's right is a coordinate: the child retains frame.width + cropped,

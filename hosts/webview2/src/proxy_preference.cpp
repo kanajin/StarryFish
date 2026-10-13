@@ -14,6 +14,11 @@ std::string Name(const std::optional<ProxyAction>& choice) {
   }
 }
 }
+ProxyAction DecodeInstallChoice(const std::string& bytes) {
+  for (auto action : {ProxyAction::Acgpower, ProxyAction::Direct, ProxyAction::Island})
+    if (bytes == "GBWV-INSTALL-1\n" + Name(action) + "\n") return action;
+  throw std::runtime_error("安装连接选择记录异常，请从代理菜单选择");
+}
 std::string EncodeProxyPreference(const ProxyPreferenceState& state) {
   return "GBWV-PROXY-1\n" + Name(state.choice) + (state.uncertain ? " 1\n" : " 0\n");
 }

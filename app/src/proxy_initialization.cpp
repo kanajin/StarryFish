@@ -59,7 +59,7 @@ bool ProxyInitialization::pending() const noexcept {
       state_ == ProxyInitializationState::Running;
 }
 bool ProxyInitialization::observing() const noexcept {
-  return action_ == ProxyAction::Acgpower && state_ == ProxyInitializationState::ValuesMatched;
+  return action_ != ProxyAction::Initialize && state_ == ProxyInitializationState::ValuesMatched;
 }
 void ProxyInitialization::RevokeObservation() noexcept {
   if (observing()) state_ = ProxyInitializationState::Unconfirmed;

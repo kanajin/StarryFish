@@ -7,6 +7,7 @@ struct ProxyPreferenceState {
   std::optional<ProxyAction> choice;
   bool uncertain = false;
 };
+ProxyAction DecodeInstallChoice(const std::string& bytes);
 std::string EncodeProxyPreference(const ProxyPreferenceState& state);
 ProxyPreferenceState DecodeProxyPreference(const std::string& bytes);
 // Gbrowser-owned per-UDF record, never a substitute for worker/effective proxy

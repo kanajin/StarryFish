@@ -1,6 +1,6 @@
 """Archive only the verified installer inventory, never a whole build tree."""
 from pathlib import Path
-import hashlib, json, re, shutil, sys, urllib.request, zipfile
+import hashlib, json, re, shutil, sys
 ROOT=Path(__file__).resolve().parents[1]
 def main(version):
     if not re.fullmatch(r'\d+\.\d+\.\d+',version) or version!=(ROOT/'VERSION').read_text().strip():
@@ -20,19 +20,12 @@ def main(version):
         for marker in (prefix, prefix.decode().encode('utf-16le')):
             if marker.lower() in data.lower():raise ValueError('Personal path in release member: '+name)
     dist=ROOT/'dist';dist.mkdir(exist_ok=True)
-    output=dist/f'StarryFish-{version}-windows-x64-setup.zip'
-    with zipfile.ZipFile(output,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9) as z:
-        for name in sorted(allowed):
-            info=zipfile.ZipInfo(name,(2026,1,1,0,0,0));info.compress_type=zipfile.ZIP_DEFLATED
-            z.writestr(info,(setup/name).read_bytes())
+    output=dist/f'StarryFish-{version}-windows-x64-setup.exe'
     source=ROOT/'hosts/webview2/.deps/zeroomega-source.zip'
-    if not source.exists():
-        request=urllib.request.Request('https://codeload.github.com/zero-peak/ZeroOmega/zip/c367db220e2a3af1c65e5afffa4cf42c949f2908',headers={'User-Agent':'StarryFish-release'})
-        with urllib.request.urlopen(request,timeout=120) as response:data=response.read(64*1024*1024)
-        source.write_bytes(data)
     if hashlib.sha256(source.read_bytes()).hexdigest()!='f49f1e64f20aeec59056accb774a0b61afd6bdcae7760e47472be78ae748f553':raise ValueError('GPL source hash differs')
-    shutil.copyfile(source,dist/'ZeroOmega-v3.5.2-source.zip')
-    paths=[output,dist/'ZeroOmega-v3.5.2-source.zip']
+    if (setup/'Licenses/ZeroOmega-v3.5.2-source.zip').read_bytes()!=source.read_bytes():raise ValueError('Embedded GPL source differs')
+    shutil.copyfile(setup/'StarryFishSetup.exe',output)
+    paths=[output]
     (dist/'SHA256SUMS.txt').write_text(''.join(hashlib.sha256(p.read_bytes()).hexdigest()+'  '+p.name+'\n' for p in paths),encoding='ascii')
     print('Release installer ready:',output.name,'members:',len(allowed))
 if __name__=='__main__':main(sys.argv[1])

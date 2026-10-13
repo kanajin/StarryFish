@@ -63,4 +63,9 @@ def main():
             if role=='webview2' and len(selected)!=4:raise ValueError('SDK members missing')
         print(role+': pinned dependency ready')
 
+    source=deps/'zeroomega-source.zip'
+    raw=source.read_bytes() if source.exists() else fetch('https://codeload.github.com/zero-peak/ZeroOmega/zip/c367db220e2a3af1c65e5afffa4cf42c949f2908')
+    if hashlib.sha256(raw).hexdigest()!='f49f1e64f20aeec59056accb774a0b61afd6bdcae7760e47472be78ae748f553':raise ValueError('ZeroOmega source hash mismatch')
+    if not source.exists():source.write_bytes(raw)
+
 if __name__=='__main__':main()

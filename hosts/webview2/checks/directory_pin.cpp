@@ -19,6 +19,7 @@
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
+void RunResourceCacheChecks(const std::filesystem::path& root);
 
 namespace {
 void Require(bool value, const char* message) { if (!value) throw std::runtime_error(message); }
@@ -50,6 +51,22 @@ int wmain(int argc, wchar_t** argv) {
       return 0;
     }
     Require(argc == 2, "one isolated test directory required");
+    {
+      using gbrowser::webview::NeedsHelperTargetNavigation;
+      int bound = 0, navigations = 0; bool ready = false;
+      for (int incoming : {42, 42, 42, 42}) {
+        if (NeedsHelperTargetNavigation(bound, incoming, ready)) { ++navigations; ready = true; }
+        bound = incoming;
+      }
+      Require(navigations == 1, "repeated game document loads reset Tarou panel");
+      for (int incoming : {0, -1, 43}) {
+        bool rejected = false;
+        try { NeedsHelperTargetNavigation(bound, incoming, ready); } catch (const std::exception&) { rejected = true; }
+        Require(rejected && navigations == 1, "changed target replaced the bound helper");
+      }
+      Require(NeedsHelperTargetNavigation(bound, bound, false), "missing helper cannot bind its existing target");
+      std::cout << "PASS stable game target keeps existing Tarou panel through reload/battle; changed target rejected; no browser\n";
+    }
     {
       using namespace gbrowser;
       using namespace gbrowser::webview;
@@ -254,6 +271,17 @@ int wmain(int argc, wchar_t** argv) {
       const auto child = webview::GameViewBounds(visible_game, 70);
       Require(child.right - child.left == 570 && child.left == -70 && child.right == visible_game.width,
           "Moba child bounds removed the hidden width twice");
+      int retained_inset = 70;
+      for (int navigation = 0; navigation < 3; ++navigation) {
+        retained_inset = webview::RetainedGameInset(retained_inset, "https://game.granbluefantasy.jp/#mypage");
+        const auto reloaded = webview::GameViewBounds(visible_game, retained_inset);
+        Require(EqualRect(&child, &reloaded), "game reload transiently resized its renderer");
+      }
+      for (const auto source : {"about:blank", "https://connect.mobage.jp/login", "https://game.granbluefantasy.jp.evil/",
+                               "https://example.org/", "https://game.granbluefantasy.jp@evil/"}) {
+        const auto external = webview::GameViewBounds(visible_game, webview::RetainedGameInset(retained_inset, source));
+        Require(external.left == 0 && external.right == 500, "non-game page inherited a clipped viewport");
+      }
       const auto old_link = webview::DecodePaneState("GBWV-PANES-2\n1 1 1 1 1 0 50 33\n");
       Require(old_link.dual && old_link.game_width == 0 && old_link.tarou_share == 3300 &&
           webview::EncodePaneState(old_link).rfind("GBWV-PANES-5\n", 0) == 0, "old toggle was not retired through migration");
@@ -462,6 +490,7 @@ int wmain(int argc, wchar_t** argv) {
     gbrowser::RequireSafePath(root);
     Require(root.is_absolute() && std::filesystem::is_directory(root) && std::filesystem::is_empty(root),
             "must use a new empty temporary directory");
+    RunResourceCacheChecks(root);
     {
       const auto path = root / L"layout.state";
       gbrowser::webview::UserStateFile state(path);
@@ -523,6 +552,12 @@ int wmain(int argc, wchar_t** argv) {
     }
     {
       using namespace gbrowser::webview;
+      Require(DecodeInstallChoice("GBWV-INSTALL-1\nacgpower\n") == gbrowser::ProxyAction::Acgpower &&
+          DecodeInstallChoice("GBWV-INSTALL-1\nisland\n") == gbrowser::ProxyAction::Island &&
+          DecodeInstallChoice("GBWV-INSTALL-1\ndirect\n") == gbrowser::ProxyAction::Direct, "installer choice decoding");
+      bool invalid_install_choice = false;
+      try { DecodeInstallChoice("GBWV-INSTALL-1\nunknown\n"); } catch (const std::exception&) { invalid_install_choice = true; }
+      Require(invalid_install_choice, "invalid installer choice accepted");
       const auto data = root / L"ProxyPreference"; std::filesystem::create_directory(data);
       ProxyPreference state(data); Require(!state.state().choice && !state.state().uncertain, "fresh profile selected a proxy");
       state.BeginWrite();

@@ -55,10 +55,20 @@
     return equal(reference, actual);
   };
   const equalOptions = actual => {
-    if (!actual || typeof actual !== 'object' || Array.isArray(actual) ||
-        Object.keys(actual).length !== Object.keys(expected).length) return false;
-    return Object.keys(expected).every(key => Object.prototype.hasOwnProperty.call(actual, key) &&
-      (key.startsWith('+') ? equalProfile(expected[key], actual[key]) : equal(expected[key], actual[key])));
+    // Static categories only; never put actual keys, settings or API errors in
+    // diagnostics. A fresh traversal budget belongs to each readback sample.
+    budget = 100000;
+    let difference = 0;
+    if (!actual || typeof actual !== 'object' || Array.isArray(actual)) difference = 1;
+    else if (Object.keys(actual).length !== Object.keys(expected).length ||
+        Object.keys(expected).some(key => !Object.prototype.hasOwnProperty.call(actual, key))) difference = 2;
+    else for (const key of Object.keys(expected)) {
+      if (!(key.startsWith('+') ? equalProfile(expected[key], actual[key]) : equal(expected[key], actual[key]))) {
+        difference = key.startsWith('+') ? 4 : 3; break;
+      }
+    }
+    window.__gbrowserProxyInitDiagnostic = difference;
+    return difference === 0;
   };
   const baselineMatches = actual => {
     if (!actual || typeof actual !== 'object' || Array.isArray(actual) ||
@@ -136,14 +146,56 @@
     }
   };
   let approvedPacData = null;
-  const matchesProxy = effective => effective.levelOfControl === 'controlled_by_this_extension' &&
-    effective.value && effective.value.mode === 'pac_script' && effective.value.pacScript &&
-    effective.value.pacScript.mandatory === true &&
-    (approvedPacData === null ?
-      effective.value.pacScript.url === expected['+acgpower'].pacUrl &&
-        !Object.prototype.hasOwnProperty.call(effective.value.pacScript, 'data') :
-      effective.value.pacScript.data === approvedPacData &&
-        !Object.prototype.hasOwnProperty.call(effective.value.pacScript, 'url'));
+  const islandPac = actual => {
+    if (typeof OmegaPac === 'undefined') throw new Error('PAC generator unavailable');
+    const options = {}, visited = new Set();
+    const copy = name => {
+      if (name === 'direct' || visited.has(name)) return;
+      visited.add(name);
+      const reference = expected['+' + name], profile = actual['+' + name];
+      options['+' + name] = profile;
+      if (profile.profileType === 'RuleListProfile' && profile.pacScript) {
+        const temp = OmegaPac.Profiles.create('__tempZeroRuleListPac', profile.profileType);
+        for (const key of ['defaultProfileName', 'format', 'matchProfileName', 'ruleList']) temp[key] = profile[key];
+        temp.isTempPacProfile = true;
+        const generated = OmegaPac.PacGenerator.script({['+' + temp.name]: temp}, temp.name, {profileNotFound: () => 'ignore'});
+        if (profile.pacScript !== OmegaPac.PacGenerator.ascii(generated.print_to_string({beautify: true, comments: true})))
+          throw new Error('derived rule PAC differs');
+      }
+      [reference.defaultProfileName, reference.matchProfileName, ...(reference.rules || []).map(rule => rule.profileName)]
+        .filter(Boolean).forEach(copy);
+    };
+    copy(action);
+    const profile = options['+' + action];
+    const ast = OmegaPac.PacGenerator.compress(OmegaPac.PacGenerator.script(options, profile,
+      {profileNotFound: () => { throw new Error('missing PAC profile'); }}));
+    const name = OmegaPac.PacGenerator.ascii(JSON.stringify(profile.name)).replace(/\*/g, '\\u002a').replace(/\\/g, '\\u002f');
+    return '/*OmegaProfile*' + name + '*' + profile.revision + '*/' + OmegaPac.PacGenerator.ascii(ast.print_to_string());
+  };
+  // OmegaPac keeps module-wide minifier character frequencies. Normalize only
+  // its fixed factory's local bindings. Anchoring and backreferences preserve
+  // every reference; the remaining rules and endpoints compare byte for byte.
+  const canonicalIslandPac = text => {
+    const factory = /^(\/\*OmegaProfile\*[^\r\n]*?\*\/var FindProxyForURL=)function\(([a-zA-Z_$]),([a-zA-Z_$])\)\{return function\(([a-zA-Z_$]),([a-zA-Z_$])\)\{"use strict";var ([a-zA-Z_$])=\2,([a-zA-Z_$])=\4\.substr\(0,\4\.indexOf\(":"\)\);do\{if\(!\3\[\6\]\)return \6;\6=\3\[\6\];if\("function"===typeof \6\)\6=\6\(\4,\5,\7\)\}while\("string"!==typeof \6\|\|43===\6\.charCodeAt\(0\)\);return \6\}\}\(/;
+    const match = factory.exec(text);
+    if (!match || new Set(match.slice(2)).size !== 6) return null;
+    return match[1] + '<validated Omega factory>(' + text.slice(match[0].length);
+  };
+  const matchesProxy = effective => {
+    if (effective.levelOfControl !== 'controlled_by_this_extension' || !effective.value) return false;
+    if (action === 'direct') return effective.value.mode === 'direct' &&
+      !Object.prototype.hasOwnProperty.call(effective.value, 'pacScript') && !Object.prototype.hasOwnProperty.call(effective.value, 'rules');
+    return effective.value.mode === 'pac_script' && effective.value.pacScript &&
+      effective.value.pacScript.mandatory === true &&
+      (approvedPacData === null ?
+        action === 'acgpower' && effective.value.pacScript.url === expected['+acgpower'].pacUrl &&
+          !Object.prototype.hasOwnProperty.call(effective.value.pacScript, 'data') :
+        (effective.value.pacScript.data === approvedPacData || (action === '岛风go' &&
+          typeof effective.value.pacScript.data === 'string' &&
+          canonicalIslandPac(approvedPacData) !== null &&
+          canonicalIslandPac(effective.value.pacScript.data) === canonicalIslandPac(approvedPacData))) &&
+          !Object.prototype.hasOwnProperty.call(effective.value.pacScript, 'url'));
+  };
   let observer = null, watch = null, observing = false, changed = false, heartbeat = 0, verifying = false;
   const waitForHost = async () => {
     const deadline = Date.now() + 2000;
@@ -180,9 +232,24 @@
       // Authorization precedes the first mutation; never issue reset twice.
       if (window.__gbrowserProxyInitializationStarted) throw new Error('already submitted');
       window.__gbrowserProxyInitializationStarted = true;
+      window.__gbrowserProxyInitDiagnostic = 10; // Reset has not returned.
       await call('reset', [expected]);
       if (!sameDocument()) throw new Error('document changed');
-      const matched = equalOptions(await call('getAll', []));
+      // ChromeStorage delivers onChanged separately from reset's reply. Read
+      // until two consecutive exact samples agree, with a bounded window.
+      // Never repeat reset, applyProfile, or any other write to obtain a match.
+      const started = Date.now(); let consecutive = 0, matched = false;
+      for (let sample = 0; sample < 6; ++sample) {
+        if (!sameDocument()) throw new Error('document changed');
+        window.__gbrowserProxyInitDiagnostic = 11; // Readback has not returned.
+        const actual = await call('getAll', []);
+        if (!sameDocument()) throw new Error('document changed');
+        consecutive = equalOptions(actual) ? consecutive + 1 : 0;
+        if (Date.now() - started > 2000) { window.__gbrowserProxyInitDiagnostic = 6; break; }
+        if (consecutive === 2) { matched = true; break; }
+        if (sample < 5) await new Promise(resolve => setTimeout(resolve, 150));
+      }
+      if (!matched && window.__gbrowserProxyInitDiagnostic === 0) window.__gbrowserProxyInitDiagnostic = 5;
       await host(matched ? 'matched' : 'different');
       // Reset changes the worker while the options form retains its old copy.
       // Refresh only after native acknowledgement; never retry a write here.
@@ -202,6 +269,11 @@
         // is unavailable; no fallback to direct and no configuration write.
         await readLocalPac();
       }
+      if (action === '岛风go') {
+        for (let i = 0; i < 20 && typeof OmegaPac === 'undefined' && sameDocument(); ++i)
+          await new Promise(resolve => setTimeout(resolve, 100));
+        approvedPacData = islandPac(actual);
+      }
       if (!sameDocument()) throw new Error('document changed');
       // Reauthorize after asynchronous preflight, immediately before mutation.
       if (!readOnly) {
@@ -211,7 +283,7 @@
       if (!sameDocument()) throw new Error('document changed');
       const state = await call('getState', [['currentProfileName', 'isSystemProfile']]);
       let matched = state && state.currentProfileName === action && state.isSystemProfile === false;
-      if (matched && action === 'acgpower') {
+      if (matched) {
         // Read the browser's effective regular-profile configuration, rather
         // than only the worker's in-memory selected name. Never write it here.
         // This confirms configuration/control, not PAC reachability or routing.

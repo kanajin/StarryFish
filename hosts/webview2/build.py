@@ -178,6 +178,7 @@ def test():
 def setup_members():
     root = BUILD / 'native/Release'
     return {'StarryFish.exe': root / 'StarryFish.exe',
+            'Licenses/ZeroOmega-v3.5.2-source.zip': ROOT / '.deps/zeroomega-source.zip',
             'WebView2-SDK-LICENSE.txt': SDK / 'LICENSE.txt',
             'LICENSE.txt': ROOT.parents[1] / 'LICENSE',
             'THIRD_PARTY_NOTICES.md': ROOT.parents[1] / 'THIRD_PARTY_NOTICES.md',
@@ -197,11 +198,16 @@ def compile_setup(fingerprint, output):
         observation._read_regular(path, size, digest, size)
         definitions.append('new Member(' + json.dumps(name) + ',' + str(size) + ',' + json.dumps(digest) + ')')
     text = 'namespace Gbrowser.Setup { internal sealed class Member { internal readonly string Name, Hash; internal readonly int Bytes; internal Member(string name,int bytes,string hash) { Name=name; Bytes=bytes; Hash=hash; } }\n'
-    text += 'internal static class SetupInputs { internal const string HostFingerprint=' + json.dumps(fingerprint) + ';\n'
+    text += 'internal static class SetupInputs { internal const string Version=' + json.dumps((ROOT.parents[1] / 'VERSION').read_text().strip()) + '; internal const string HostFingerprint=' + json.dumps(fingerprint) + ';\n'
     text += 'internal const string ZeroTree="68cc0ca912f033f7841633d5dcf50c29687c6f6e76617c05cbeddb49f530caa5";\n'
     text += 'internal static readonly Member[] Files={' + ','.join(definitions) + '}; } }\n'
     generated = BUILD / 'generated/SetupInputs.cs'
     generated.write_text(text, encoding='utf-8')
+    embedded = BUILD / 'generated/setup-payload.zip'
+    import zipfile
+    with zipfile.ZipFile(embedded, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
+        for name, path in sorted(members.items()):
+            archive.writestr(name, path.read_bytes())
     destination = BUILD / 'setup'
     destination.mkdir(exist_ok=True)
     compiler = vs_root() / 'MSBuild/Current/Bin/Roslyn/csc.exe'
@@ -209,8 +215,9 @@ def compile_setup(fingerprint, output):
               '/r:System.IO.Compression.dll', '/r:System.IO.Compression.FileSystem.dll', '/r:System.Security.dll',
               '/r:System.Windows.Forms.dll', '/r:System.Drawing.dll',
                '/win32icon:' + str(ROOT.parents[1] / 'assets/starryfish.ico'), str(ROOT / 'setup/Source.cs'), str(ROOT / 'setup/Setup.cs'), str(ROOT / 'setup/ManualReload.cs'),
-               str(ROOT / 'setup/ApplicationUpdate.cs'), str(ROOT / 'setup/SetupWindow.cs'), str(generated)]
-    subprocess.run([*common, '/main:Gbrowser.Setup.Program', '/out:' + str(destination / 'StarryFishSetup.exe')],
+               str(ROOT / 'setup/ApplicationUpdate.cs'), str(ROOT / 'setup/SetupWindow.cs'), str(ROOT / 'setup/SetupOptions.cs'),
+               str(ROOT / 'setup/EmbeddedPackage.cs'), str(ROOT / 'setup/Integration.cs'), str(generated)]
+    subprocess.run([*common, '/target:winexe', '/resource:' + str(embedded) + ',StarryFish.Payload.zip', '/main:Gbrowser.Setup.Program', '/out:' + str(destination / 'StarryFishSetup.exe')],
                    stdout=output, stderr=subprocess.STDOUT, check=True)
     subprocess.run([*common, str(ROOT / 'checks/SetupChecks.cs'), '/main:Gbrowser.Setup.SetupChecks',
                     '/out:' + str(destination / 'SetupChecks.exe')], stdout=output, stderr=subprocess.STDOUT, check=True)
@@ -369,7 +376,8 @@ def generate_scripts():
         text = path.read_text(encoding='utf-8')
         if ')wvjs"' in text:
             raise ValueError('embedded script delimiter collision')
-        header += 'inline constexpr char ' + name + '[] = R"wvjs(' + text + ')wvjs";\n'
+        header += 'inline constexpr char ' + name + '[] = ' + '\n'.join(
+            'R"wvjs(' + text[offset:offset + 4000] + ')wvjs"' for offset in range(0, len(text), 4000)) + ';\n'
     (BUILD / 'generated/proxy_scripts.h').write_text(header, encoding='utf-8')
 
 

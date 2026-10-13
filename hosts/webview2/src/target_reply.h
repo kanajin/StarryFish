@@ -8,6 +8,13 @@
 
 namespace gbrowser::webview {
 struct TargetReply { int id, reason, sample; };
+// The permanent game's runtime ID survives document loads. Revalidating that
+// ID must not navigate an already bound helper and reset its current panel.
+inline bool NeedsHelperTargetNavigation(int bound, int incoming, bool helper_ready) {
+  if (incoming <= 0 || (bound && bound != incoming) || (helper_ready && !bound))
+    throw std::runtime_error("游戏目标身份变化");
+  return !helper_ready;
+}
 // ExecuteScript returns a JSON string with four numeric fields. Parse the same
 // bounded contract used by the extension bridge; never accept escaped payloads
 // or narrow a valid signed 32-bit tab ID to a nine-digit application budget.

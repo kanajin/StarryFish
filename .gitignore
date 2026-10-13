@@ -11,4 +11,5 @@
 UserData/
 Validation/
 GbfValidation/
+**/Cache/Static-v1/
 dist/
