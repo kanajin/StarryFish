@@ -26,6 +26,8 @@
 #include "bookmark_navigation.h"
 #include "convenience_layout.h"
 #include "game_copy.h"
+#include "browser_history.h"
+#include "login_resume.h"
 #include "ui_theme.h"
 #include "compact_chrome.h"
 #include "host_ui_flow.h"
@@ -576,7 +578,7 @@ class Host {
     Check(core->add_WindowCloseRequested(Callback<ICoreWebView2WindowCloseRequestedEventHandler>(
         [this, index, generation](ICoreWebView2*, IUnknown*) -> HRESULT {
           if (!CurrentView(index, generation)) return S_OK;
-          if (index == 3 && login_window_) PostMessageW(window_, kCloseLogin, 0, 0);
+          if (index == 3 && login_window_) PostMessageW(window_, kCloseLogin, 0, static_cast<LPARAM>(generation));
           if (index == 1) PostMessageW(window_, kHideTarou, 0, 0);
           if (index == kArcarumView) PostMessageW(window_, kHideArcarum, 0, 0);
           if (index >= gbrowser::webview::TabSlots::kFirst)
@@ -1035,6 +1037,9 @@ class Host {
     }
     phase_ = L"创建Mobage登录窗口";
     timings_.Mark("login-popup-request-accepted");
+    KillTimer(window_, 8);
+    ++login_attempt_;
+    login_resume_ = {view_generations_[0], navigation_epochs_[0], login_attempt_, Utf8ToWide(source)};
     auto request = std::make_shared<WindowRequest>(args);
     login_closing_ = false;
     login_window_ = CreateWindowExW(0, L"GbrowserMobageLogin", L"StarryFish · Mobage登录",
@@ -1089,12 +1094,44 @@ class Host {
     if (!focus || focus == login_window_ || !IsChild(login_window_, focus))
       Check(views_[3].controller->MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC));
   }
-  void CloseLogin() {
+  void CloseLogin(bool resume = false) {
+    const bool was_open = login_window_ && !login_closing_;
     login_closing_ = true;
     if (login_pending_) return;
     if (views_[3].controller) views_[3].controller->Close();
     views_[3].core.Reset(); views_[3].controller.Reset();
     if (login_window_) { DestroyWindow(login_window_); login_window_ = nullptr; }
+    if (resume && was_open && !closing_ && !failed_ && BrowsingAvailable() &&
+        gbrowser::webview::LoginResumeEntry(login_resume_.source)) {
+      // The SDK may have queued its authorization callback before window.close.
+      // Let it finish before considering a single ordinary game entry reload.
+      if (SetTimer(window_, 8, 750, nullptr)) timings_.Mark("login-resume-grace-started");
+      else timings_.Mark("login-resume-timer-unavailable");
+    }
+  }
+  void ResumeLogin() {
+    KillTimer(window_, 8);
+    if (closing_ || failed_ || login_window_ || login_pending_ || !BrowsingAvailable() || !views_[0].core) return;
+    const auto source = ComText([&](LPWSTR* value) { return views_[0].core->get_Source(value); });
+    const auto recovery = login_resume_;
+    if (!recovery.Matches(view_generations_[0], navigation_epochs_[0], login_attempt_, source)) return;
+    ++pending_;
+    const auto result = views_[0].core->ExecuteScript(gbrowser::webview::kLoginChannelVisible,
+        Callback<ICoreWebView2ExecuteScriptCompletedHandler>(
+            [this, recovery](HRESULT error, LPCWSTR json) -> HRESULT {
+              --pending_;
+              Guard([&] {
+                if (FAILED(error) || !json || std::wstring_view(json) != L"true" || closing_ || failed_ ||
+                    login_window_ || login_pending_ || !BrowsingAvailable() || !views_[0].core) return;
+                const auto current = ComText([&](LPWSTR* value) { return views_[0].core->get_Source(value); });
+                if (!recovery.Matches(view_generations_[0], navigation_epochs_[0], login_attempt_, current)) return;
+                // Consume before Reload: reentrancy or a late callback cannot repeat it.
+                ++login_attempt_;
+                Check(views_[0].core->Reload());
+                timings_.Mark("login-channel-entry-reloaded");
+              }); Drain(); return S_OK;
+            }).Get());
+    if (FAILED(result)) { --pending_; timings_.Mark("login-resume-probe-unavailable"); }
   }
 
   static bool IsAuxiliary(size_t index) {
@@ -2237,7 +2274,14 @@ class Host {
         if (index == SIZE_MAX || !views_[index].core) continue;
         auto& core = views_[index].core;
         if (action == Shortcut::Reload) Check(core->Reload());
-        else { BOOL can = FALSE;
+        else if (const auto script = gbrowser::webview::GameHistoryScript(
+            ComText([&](LPWSTR* source) { return core->get_Source(source); }), action == Shortcut::Forward)) {
+          // CanGoBack/GoBack use Chromium's UI skipping rules. GBF can redirect
+          // a just-restored supporter route back to the battle without another
+          // user activation, making the next UI back unavailable. Traverse the
+          // real session history for each explicit game back/forward instead.
+          Check(core->ExecuteScript(script, nullptr));
+        } else { BOOL can = FALSE;
           Check(action == Shortcut::Back ? core->get_CanGoBack(&can) : core->get_CanGoForward(&can));
           if (can) Check(action == Shortcut::Back ? core->GoBack() : core->GoForward()); }
       }
@@ -2513,6 +2557,7 @@ class Host {
     KillTimer(window_, 3);
     KillTimer(window_, 4); KillTimer(window_, 5); split_layout_pending_ = false;
     KillTimer(window_,7);proxy_menu_loading_=false;
+    KillTimer(window_, 8); ++login_attempt_;
     CloseLogin();
     for (size_t index = gbrowser::webview::TabSlots::kAuxFirst; index < views_.size(); ++index)
       Guard([&] { CloseAuxiliary(index, view_generations_[index]); });
@@ -2938,7 +2983,7 @@ class Host {
         PostMessageW(window, kFocusLogin, 0, 0);
       }
       if (message == WM_SIZE) { host->Guard([&] { host->LayoutLogin(); }); return 0; }
-      if (message == WM_CLOSE) { host->CloseLogin(); return 0; }
+      if (message == WM_CLOSE) { host->CloseLogin(true); return 0; }
       if (message == WM_DESTROY) { if (window == host->login_window_) host->login_window_ = nullptr; return 0; }
       if (message == WM_GETMINMAXINFO) {
         auto info = reinterpret_cast<MINMAXINFO*>(lparam);
@@ -2954,7 +2999,10 @@ class Host {
           host->StartProxy(static_cast<ProxyAction>(lparam),false,host->proxy_custom_name_);
       }); return 0;
     }
-    if (message == kCloseLogin) { host->CloseLogin(); return 0; }
+    if (message == kCloseLogin) {
+      if (host->CurrentView(3, static_cast<uint64_t>(lparam))) host->CloseLogin(true);
+      return 0;
+    }
     if (message == kProxyMenuReady) {host->Guard([&]{host->ShowProxyMenu(static_cast<uint64_t>(wparam));});return 0;}
     if (message == kMeasureSecondaryMenu) {
       host->Guard([&] {
@@ -3025,6 +3073,7 @@ class Host {
     if (message == WM_ENABLE && wparam) host->Guard([&] { host->RefreshProfileTitle(); });
     if (message == WM_CLOSE) { host->Close(); return 0; }
     if (message == WM_TIMER) {
+      if (wparam == 8) host->Guard([&] { host->ResumeLogin(); });
       if (wparam == 6) host->CompleteCacheJobs();
       if (wparam == 7) host->PollProxyMenu();
       if (wparam == 2) host->Guard([&] { host->PollProxy(); });
@@ -3149,6 +3198,8 @@ class Host {
   ULONGLONG target_polling_ = 0;
   bool target_rebind_pending_ = false;
   bool browser_started_ = false, browser_exited_ = false, login_pending_ = false, login_closing_ = false;
+  uint64_t login_attempt_ = 0;
+  gbrowser::webview::LoginResume login_resume_;
 };
 
 bool StartGameCandidate() noexcept {

@@ -149,6 +149,7 @@ def test():
     subprocess.run([node, str(ROOT / 'checks/user_scripts.js')], check=True)
     subprocess.run([node, str(ROOT / 'checks/proxy_profiles.cjs')], check=True)
     subprocess.run([node, str(ROOT / 'checks/loading_display.cjs')], check=True)
+    subprocess.run([node, str(ROOT / 'checks/login_resume.cjs')], check=True)
     subprocess.run([node, str(APP / 'tests/proxy_initialization_js_tests.cjs')], check=True)
     directory = tempfile.mkdtemp(prefix='directory-check-', dir=BUILD)
     subprocess.run([str(BUILD / 'native/Release/NativeSourceChecks.exe'), directory], check=True)

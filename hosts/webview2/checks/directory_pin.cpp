@@ -14,6 +14,8 @@
 #include "bookmark_navigation.h"
 #include "convenience_layout.h"
 #include "game_copy.h"
+#include "browser_history.h"
+#include "login_resume.h"
 #include "compact_chrome.h"
 #include "host_ui_flow.h"
 #include <windows.h>
@@ -52,6 +54,39 @@ int wmain(int argc, wchar_t** argv) {
       return 0;
     }
     Require(argc == 2, "one isolated test directory required");
+    {
+      using gbrowser::webview::LoginResume;
+      using gbrowser::webview::LoginResumeEntry;
+      Require(LoginResumeEntry(L"https://game.granbluefantasy.jp/#mypage") &&
+          LoginResumeEntry(L"https://game.granbluefantasy.jp/#top") &&
+          LoginResumeEntry(L"https://gbf.game.mbga.jp/"), "known game login entry rejected");
+      for (const wchar_t* url : {L"https://game.granbluefantasy.jp/#raid_multi/1",
+          L"https://game.granbluefantasy.jp/?code=secret", L"https://connect.mobage.jp/",
+          L"http://game.granbluefantasy.jp/", L"https://game.granbluefantasy.jp.evil.test/",
+          L"https://game.granbluefantasy.jp/oauth/callback", L"https://game.granbluefantasy.jp/#mypage?state=secret"})
+        Require(!LoginResumeEntry(url), "login recovery admitted callback/battle/spoof/query");
+      const LoginResume recovery{1, 4, 9, L"https://game.granbluefantasy.jp/#mypage"};
+      const LoginResume fixed_game{0, 4, 9, recovery.source};
+      Require(fixed_game.Matches(0, 4, 9, recovery.source), "fixed game generation zero cannot resume");
+      Require(!LoginResume{}.Matches(0, 0, 0, L""), "empty login recovery admitted");
+      Require(recovery.Matches(1, 4, 9, recovery.source), "unchanged opener cannot resume");
+      Require(!recovery.Matches(2, 4, 9, recovery.source) && !recovery.Matches(1, 5, 9, recovery.source) &&
+          !recovery.Matches(1, 4, 10, recovery.source) &&
+          !recovery.Matches(1, 4, 9, L"https://game.granbluefantasy.jp/#title"),
+          "late login close/probe crossed view/navigation/popup/source identity");
+      std::cout << "PASS bounded login resume identity and entry policy; browser NOT_STARTED\n";
+    }
+    {
+      using gbrowser::webview::GameHistoryScript;
+      Require(GameHistoryScript(L"https://game.granbluefantasy.jp/#raid_multi/1", false) &&
+          GameHistoryScript(L"https://gbf.game.mbga.jp/#quest/supporter_raid/1/2", true),
+          "trusted GBF routes lost actual session history navigation");
+      for (const wchar_t* url : {L"https://game.granbluefantasy.jp/", L"https://connect.mobage.jp/#raid_multi/1",
+           L"http://game.granbluefantasy.jp/#raid_multi/1", L"https://game.granbluefantasy.jp.evil.test/#raid_multi/1",
+           L"https://game.granbluefantasy.jp/login#raid_multi/1", L"about:blank", L"chrome-extension://id/#raid_multi/1"})
+        Require(!GameHistoryScript(url, false), "non-game/login document selected game session history");
+      std::cout << "PASS GBF session history policy; login/HTTP/spoof/path/extension rejection; browser NOT_STARTED\n";
+    }
     {
       using gbrowser::webview::NeedsHelperTargetNavigation;
       int bound = 0, navigations = 0; bool ready = false;

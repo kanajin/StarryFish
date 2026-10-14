@@ -10,7 +10,7 @@
 
 ## 下载与安装
 
-v0.1.7 新增隐藏 GBF 加载画面角色与文字，并改进代理恢复和手动重选。
+v0.1.8 改进 GBF 战斗历史后退，以及 Mobage 登录弹窗关闭后的页面恢复。
 
 在 [Releases](https://github.com/kanajin/StarryFish/releases/latest) 下载 **StarryFish-版本-windows-x64-setup.exe**，直接运行单个安装器，无需解压。
 
@@ -64,7 +64,7 @@ python -B build.py test
 python -B build.py verify
 python -B build.py package-setup
 cd ../..
-python -B tools/package_release.py 0.1.7
+python -B tools/package_release.py 0.1.8
 ```
 
 依赖从官方固定 URL 获取并验证 SHA256。太郎/肉鸽固定快照仅用于构建检查；终端用户首装可解析上游最新版本，或选择两个本地 ZIP。包输出在 `dist/`。推送 `main` 会构建并保留检查产物，推送 `v*` 标签会额外发布 GitHub Release；工作流不会访问或上传本地用户资料。发布新版本前需同时更新 `VERSION` 与 `RELEASE_NOTES.md`，标签版本必须与 `VERSION` 一致。
