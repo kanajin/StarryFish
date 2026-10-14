@@ -9,7 +9,7 @@ enum class ProxyInitializationState {
   PreflightUnavailable
 };
 enum class ProxyInitializationReply { Reject, Authorize, Finished, Observed };
-enum class ProxyAction { Initialize, Direct, Acgpower, Island };
+enum class ProxyAction { Initialize, Direct, Acgpower, Island, Custom };
 std::string_view ProxyActionName(ProxyAction action);
 // One confirmed selection waiting for its exact controller. Kept in memory
 // only: readiness consumes dispatch once; neither callbacks nor timers retry.

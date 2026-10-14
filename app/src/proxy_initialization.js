@@ -1,7 +1,10 @@
 // Executed only in an explicitly confirmed, pinned original ZeroOmega options
 // document. Use its replied worker API; no storage edits, silent retries or
 // original-package changes. A lost reply may follow a partially completed reset.
-(async function runProxyAction(operation, expectedUrl, expected, action, readOnly = false) {
+(async function runProxyAction(operation, expectedUrl, expected, action, readOnly = false, customHex = '') {
+  const custom=action==='custom';
+  const helper=custom?window.__starryfishProfiles:null;
+  let prepared=null;
   const host = (verb) => new Promise((resolve, reject) => {
     window.gbrowserProxyQuery({request: operation + ':' + verb, persistent: false,
       onSuccess: resolve, onFailure: () => reject(new Error('host denied'))});
@@ -108,6 +111,7 @@
         Object.prototype.hasOwnProperty.call(response, 'error'), response && response.result);
     });
   });
+  const prepareCustom = async options => helper.prepare(options,action,await call('getTempRules',[]));
   const proxyConfiguration = () => replied(finish => {
     chrome.proxy.settings.get({incognito: false}, result => {
       finish(chrome.runtime.lastError || !result || typeof result !== 'object', result);
@@ -183,6 +187,7 @@
   };
   const matchesProxy = effective => {
     if (effective.levelOfControl !== 'controlled_by_this_extension' || !effective.value) return false;
+    if (custom) return helper.matches(prepared,effective);
     if (action === 'direct') return effective.value.mode === 'direct' &&
       !Object.prototype.hasOwnProperty.call(effective.value, 'pacScript') && !Object.prototype.hasOwnProperty.call(effective.value, 'rules');
     return effective.value.mode === 'pac_script' && effective.value.pacScript &&
@@ -217,8 +222,9 @@
     observer = null;
   };
   try {
-    if (!['initialize', 'direct', 'acgpower', '岛风go'].includes(action) ||
+    if (!['initialize', 'direct', 'acgpower', '岛风go', 'custom'].includes(action) ||
         typeof readOnly !== 'boolean' || (readOnly && action === 'initialize')) return;
+    if (custom) {if (!helper || !helper.sameDocument()) return;action=helper.decode(customHex);}
     await waitForHost();
     // A document signal starts only the read-only worker preflight. Runtime
     // bindings/worker replies still have to exist before native apply authority.
@@ -228,7 +234,7 @@
     // tabs may throttle timers, so waiting for the old operation to expire
     // would accumulate observers after repeated selections.
     if (window.__gbrowserProxyWatch) window.__gbrowserProxyWatch.stop();
-    if (action === 'initialize') {
+    if (!custom && action === 'initialize') {
       // Authorization precedes the first mutation; never issue reset twice.
       if (window.__gbrowserProxyInitializationStarted) throw new Error('already submitted');
       window.__gbrowserProxyInitializationStarted = true;
@@ -258,23 +264,30 @@
       }
     } else {
       const actual = await call('getAll', []);  // The original worker's readiness reply; no separate probe/write.
-      if (!baselineMatches(actual)) { await host('different'); return; }
-      if (action === 'acgpower' && actual['+acgpower'].pacScript) {
+      if (custom) {
+        for (let i=0;i<20 && typeof OmegaPac==='undefined' && sameDocument();++i)
+          await new Promise(resolve=>setTimeout(resolve,100));
+        prepared=await prepareCustom(actual);
+      } else if (!baselineMatches(actual)) { await host('different'); return; }
+      if (!custom && action === 'acgpower' && actual['+acgpower'].pacScript) {
         const local = await readLocalPac();
         if (actual['+acgpower'].pacScript !== local) { await host('different'); return; }
         approvedPacData = pacAscii(local);
-      } else if (readOnly && action === 'acgpower') {
+      } else if (!custom && readOnly && action === 'acgpower') {
         // A saved URL configuration alone does not mean the local accelerator
         // is running. Startup stays at preparation when its fixed PAC service
         // is unavailable; no fallback to direct and no configuration write.
         await readLocalPac();
       }
-      if (action === '岛风go') {
+      if (!custom && action === '岛风go') {
         for (let i = 0; i < 20 && typeof OmegaPac === 'undefined' && sameDocument(); ++i)
           await new Promise(resolve => setTimeout(resolve, 100));
         approvedPacData = islandPac(actual);
       }
       if (!sameDocument()) throw new Error('document changed');
+      if (custom && !helper.sameIntent(prepared,await prepareCustom(await call('getAll',[])))) {
+        await host('different');return;
+      }
       // Reauthorize after asynchronous preflight, immediately before mutation.
       if (!readOnly) {
         if (await host('apply') !== 'authorized' || !sameDocument()) throw new Error('apply denied or document changed');
@@ -283,6 +296,7 @@
       if (!sameDocument()) throw new Error('document changed');
       const state = await call('getState', [['currentProfileName', 'isSystemProfile']]);
       let matched = state && state.currentProfileName === action && state.isSystemProfile === false;
+      if (custom) matched=matched && helper.sameIntent(prepared,await prepareCustom(await call('getAll',[])));
       if (matched) {
         // Read the browser's effective regular-profile configuration, rather
         // than only the worker's in-memory selected name. Never write it here.
@@ -327,6 +341,12 @@
             try {
               const effective = await proxyConfiguration();
               if (!observing) return;
+              if (custom) {
+                const current=await call('getState',[['currentProfileName','isSystemProfile']]);
+                const options=await call('getAll',[]);
+                if (!current || current.currentProfileName!==action || current.isSystemProfile!==false ||
+                    !helper.sameIntent(prepared,await prepareCustom(options))) throw new Error('profile changed');
+              }
               if (!sameDocument() || !matchesProxy(effective) || await host('verified') !== 'received')
                 throw new Error('observation lost');
             } catch (_) {

@@ -32,16 +32,19 @@ int wmain(int argc,wchar_t** argv) {
     Require(owner!=nullptr,"cannot create hidden drawing owner");
     const auto font=CreateFontW(-scale(14),0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,
         CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Segoe UI");
-    HWND tabs=CreateWindowW(WC_TABCONTROLW,L"",WS_CHILD|TCS_SINGLELINE,scale(318),scale(8),scale(704),scale(34),owner,nullptr,GetModuleHandleW(nullptr),nullptr);
+    HWND tabs=CreateWindowW(L"STATIC",L"",WS_CHILD|SS_NOTIFY,scale(318),scale(8),scale(704),scale(34),owner,nullptr,GetModuleHandleW(nullptr),nullptr);
     SendMessageW(tabs,WM_SETFONT,reinterpret_cast<WPARAM>(font),FALSE);
-    for (auto label : {L"碧蓝幻想",L"新标签"}) { TCITEMW item{};item.mask=TCIF_TEXT;item.pszText=const_cast<wchar_t*>(label);TabCtrl_InsertItem(tabs,TabCtrl_GetItemCount(tabs),&item); }
-    TabCtrl_SetCurSel(tabs,0); UiTheme::ConfigureTabs(tabs,dpi);
-    // Real common-control hit tests at the painted top/bottom edges, no input injection.
-    RECT hit_rect{}; Require(TabCtrl_GetItemRect(tabs,0,&hit_rect)!=FALSE,"missing native tab geometry");
-    for (LONG y : {hit_rect.top+2,hit_rect.bottom-2}) {
-      TCHITTESTINFO hit{};hit.pt={(hit_rect.left+hit_rect.right)/2,y};
-      Require(TabCtrl_HitTest(tabs,&hit)==0,"painted tab edge misses native hit target");
-    }
+    const std::vector<size_t> tab_order{0,6};
+    const IconTabLayout tab_layout(scale(704),scale(34),dpi,tab_order.size());
+    const auto hit_rect=tab_layout.Item(0);
+    for (int y : {hit_rect.y,hit_rect.y+hit_rect.height-1})
+      Require(tab_layout.Hit(hit_rect.x+hit_rect.width/2,y)==0,"painted tab edge misses its hit target");
+    Microsoft::WRL::ComPtr<IStream> favicon;
+    Require(SUCCEEDED(SHCreateStreamOnFileEx((components/L"tarou/assets/icon-48.png").c_str(),
+        STGM_READ|STGM_SHARE_DENY_NONE,0,FALSE,nullptr,&favicon)),"cannot open public favicon drawing fixture");
+    Require(theme.SetTabIcon(0,favicon.Get()),"valid PNG favicon fixture rejected");
+    const BYTE bad[]={0,1,2,3};Microsoft::WRL::ComPtr<IStream> corrupt;corrupt.Attach(SHCreateMemStream(bad,sizeof(bad)));
+    Require(!theme.SetTabIcon(6,corrupt.Get()) && !theme.SetTabIcon(6,nullptr),"invalid favicon did not fall back");
     HDC screen=GetDC(nullptr),dc=CreateCompatibleDC(screen);
     BITMAPINFO info{};info.bmiHeader={sizeof(BITMAPINFOHEADER),scale(1100),-scale(640),1,32,BI_RGB,0,0,0,0,0};void* bits=nullptr;
     HBITMAP bitmap=CreateDIBSection(screen,&info,DIB_RGB_COLORS,&bits,nullptr,0);ReleaseDC(nullptr,screen);
@@ -53,7 +56,6 @@ int wmain(int argc,wchar_t** argv) {
       if(wcscmp(codec.MimeType,L"image/png")==0){png=codec.Clsid;found=true;break;} }
     Require(found,"PNG encoder unavailable");
     for(bool browser_layout : {false,true}) for(bool dark : {false,true}) {
-      UiTheme::ConfigureTabs(tabs,dpi,browser_layout);
       theme.SetDark(dark);const auto& c=theme.colors();
       // Compare actual button pixels, without input injection or visible windows.
       // Pointer/hidden focus must match idle; keyboard focus remains discernible.
@@ -87,12 +89,12 @@ int wmain(int argc,wchar_t** argv) {
       const auto bounds=[](gbrowser::Rect r) {return RECT{r.x,r.y,r.x+r.width,r.y+r.height};};
       auto top=ToolbarGeometry(scale(1100),dpi,2);
       const auto browser=BrowserToolbarGeometry(scale(1100),dpi,2);
-      if(browser_layout) top={browser.address,browser.copy,browser.tabs,browser.functions[5],browser.minimize,browser.maximize,browser.close,browser.add};
+      if(browser_layout) top={browser.address,browser.copy,browser.tabs,browser.functions[5],browser.minimize,browser.maximize,browser.close,browser.add,browser.reload};
       theme.Round(dc,bounds(top.address),scale(9),c.surface,c.border);
       auto address=bounds(top.address);InflateRect(&address,-scale(8),0);
       theme.Text(dc,font,L"game.granbluefantasy.jp",address,c.ink,DT_LEFT);
       SetWindowPos(tabs,nullptr,top.tabs.x,top.tabs.y,top.tabs.width,top.tabs.height,SWP_NOZORDER|SWP_NOACTIVATE);
-      SetViewportOrgEx(dc,top.tabs.x,top.tabs.y,nullptr);theme.Tabs(tabs,dc,font,dpi,browser_layout);SetViewportOrgEx(dc,0,0,nullptr);
+      SetViewportOrgEx(dc,top.tabs.x,top.tabs.y,nullptr);theme.Tabs(tabs,dc,tab_order,0,dpi);SetViewportOrgEx(dc,0,0,nullptr);
       PaneState state;state.dual=true;state.game_width=310;state.game_dpi=96;
       const auto panes=ComputePaneLayout(scale(1100),scale(640),dpi,50,state,false,browser_layout);
       for(const auto game : {panes.left,panes.right}) {
@@ -112,7 +114,6 @@ int wmain(int argc,wchar_t** argv) {
       const std::array<UiIcon,5> icons{UiIcon::Components,UiIcon::Tarou,UiIcon::Proxy,UiIcon::Arcarum,UiIcon::Dual};
       if(browser_layout) {
         const std::array<UiIcon,7> actions{UiIcon::Tarou,UiIcon::Arcarum,UiIcon::Proxy,UiIcon::Dual,UiIcon::Components,UiIcon::Profile,UiIcon::More};
-        button(L"刷新",UiIcon::Reload,browser.reload);
         for(size_t i=0;i<actions.size();++i) button(L"",actions[i],browser.functions[i],i==0||i==3);
       } else {
         for(size_t i=0;i<icons.size();++i)
@@ -120,6 +121,7 @@ int wmain(int argc,wchar_t** argv) {
         button(L"更多",UiIcon::More,{scale(1056),scale(590),scale(40),scale(40)});
         button(L"StarryFish · 默认资料",UiIcon::Profile,top.profile,false,false);
       }
+      button(L"刷新",UiIcon::Reload,top.reload);
       button(L"复制",UiIcon::Copy,top.copy);
       button(L"新建标签",UiIcon::Plus,top.add);
       button(L"最小化",UiIcon::Minimize,top.minimize);
@@ -132,6 +134,18 @@ int wmain(int argc,wchar_t** argv) {
       const auto name=browser_layout?(dark?L"layout2-dark.png":L"layout2-light.png"):(dark?L"dark.png":L"light.png");
       Require(image.Save((output/name).c_str(),&png,nullptr)==Gdiplus::Ok,"cannot save preview");
       std::cout<<(dark?"dark":"light")<<" contrast PASS; actual native renderer PNG saved\n";
+    }
+    // Same native painter at an intentionally crowded width; never create the
+    // old common-control up/down buttons, and never raise a selected left pill.
+    const std::vector<size_t> crowded{0,6,7,8,9,10,11,12};
+    for (bool dark:{false,true}) {
+      theme.SetDark(dark);theme.Background(dc,scaled({0,0,1100,640}));
+      SetWindowPos(tabs,nullptr,0,0,scale(80),scale(34),SWP_NOZORDER|SWP_NOACTIVATE);
+      theme.Tabs(tabs,dc,crowded,0,dpi);
+      Gdiplus::Bitmap canvas(bitmap,nullptr);
+      std::unique_ptr<Gdiplus::Bitmap> image(canvas.Clone(0,0,scale(80),scale(34),PixelFormat32bppARGB));
+      Require(image && image->Save((output/(dark?L"tabs-overlap-dark.png":L"tabs-overlap-light.png")).c_str(),&png,nullptr)==Gdiplus::Ok,
+          "cannot save overlapping tab drawing");
     }
     SelectObject(dc,old);DeleteObject(bitmap);DeleteDC(dc);DeleteObject(font);DestroyWindow(owner);
     std::cout<<"PASS offscreen palettes; browser NOT_STARTED\n";return 0;

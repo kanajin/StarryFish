@@ -1,12 +1,13 @@
 #pragma once
 #include "ui_interaction.h"
+#include "icon_tabs.h"
 #include <array>
 
 namespace gbrowser::webview {
 // Layout 1: a single title/toolbar row and a fixed right icon rail.
 // Keep geometry shared with isolated native checks; no WebView is needed.
 struct CompactToolbar {
-  Rect address, copy, tabs, profile, minimize, maximize, close, add;
+  Rect address, copy, tabs, profile, minimize, maximize, close, add, reload;
 };
 struct BrowserToolbar {
   Rect tabs, add, minimize, maximize, close, address, copy, reload;
@@ -20,7 +21,7 @@ inline BrowserToolbar BrowserToolbarGeometry(int width, unsigned dpi, size_t tab
   out.maximize = {window_x + px(36), 0, px(36), px(36)};
   out.close = {window_x + px(72), 0, px(36), px(36)};
   const int tab_room = (std::max)(0, window_x - px(88));
-  const int tab_width = (std::min)(tab_room, static_cast<int>((std::min)(tab_count, size_t{16})) * px(180) + px(4));
+  const int tab_width = (std::min)(tab_room, IconTabsPreferredWidth(tab_count, dpi));
   out.tabs = {px(8), px(4), tab_width, px(34)};
   out.add = {px(12) + tab_width, px(4), px(30), px(30)};
   out.reload = {px(6), px(46), px(30), px(32)};
@@ -41,16 +42,18 @@ inline CompactToolbar ToolbarGeometry(int width, unsigned dpi, size_t tab_count 
   const int profile = width >= px(800) ? px(190) : width >= px(600) ? px(130) : px(36);
   const int right = (std::max)(0, width - px(4) - 3 * button);
   const int profile_x = (std::max)(0, right - profile - gap);
-  const int address = (std::clamp)(profile_x - px(142), px(100), px(236));
-  const int tabs_x = px(8) + address + gap + button + gap;
+  const int address = MulDiv((std::clamp)(profile_x - px(142), px(100), px(236)), 2, 3);
+  const int address_x = px(8) + button + gap;
+  const int tabs_x = address_x + address + gap + button + gap;
   const int tabs_width = (std::min)((std::max)(0, profile_x - gap - tabs_x - px(36)),
-      static_cast<int>((std::min)(tab_count, size_t{16})) * px(160) + px(4));
-  return {{px(8), px(6), address, px(32)},
-      {px(8) + address + gap, px(4), button, button},
+      IconTabsPreferredWidth(tab_count, dpi));
+  return {{address_x, px(6), address, px(32)},
+      {address_x + address + gap, px(4), button, button},
       {tabs_x, px(6), tabs_width, px(34)},
       {profile_x, px(4), profile, button}, {right, px(4), button, button},
       {right + button, px(4), button, button}, {right + 2 * button, px(4), button, button},
-      {tabs_x + tabs_width + px(4), px(6), px(30), px(30)}};
+      {tabs_x + tabs_width + px(4), px(6), px(30), px(30)},
+      {px(8), px(4), button, button}};
 }
 struct HelperHeader { Rect title, pin, close; };
 inline HelperHeader HeaderGeometry(Rect panel, unsigned dpi) {

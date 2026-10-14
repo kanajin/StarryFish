@@ -10,6 +10,7 @@
 #include "user_state.h"
 #include "profile_catalogue.h"
 #include "proxy_preference.h"
+#include "proxy_profiles.h"
 #include "bookmark_navigation.h"
 #include "convenience_layout.h"
 #include "game_copy.h"
@@ -108,7 +109,7 @@ int wmain(int argc, wchar_t** argv) {
       for (unsigned dpi : {96U, 144U, 192U}) {
         for (int width : {400, 600, 800, 1600}) for (size_t count : {size_t{1},size_t{2},size_t{8}}) {
           const auto toolbar = ToolbarGeometry(UiPixels(width, dpi), dpi, count);
-          const std::array<Rect, 8> controls{toolbar.address, toolbar.copy, toolbar.tabs, toolbar.add, toolbar.profile,
+          const std::array<Rect, 9> controls{toolbar.reload, toolbar.address, toolbar.copy, toolbar.tabs, toolbar.add, toolbar.profile,
               toolbar.minimize, toolbar.maximize, toolbar.close};
           int previous = 0;
           for (const auto& rect : controls) {
@@ -116,6 +117,8 @@ int wmain(int argc, wchar_t** argv) {
                 "compact toolbar controls overlap or escape at minimum width/DPI");
             previous = rect.x + rect.width;
           }
+          const int previous_address = (std::clamp)(toolbar.profile.x - UiPixels(142,dpi),UiPixels(100,dpi),UiPixels(236,dpi));
+          Require(toolbar.address.width == MulDiv(previous_address,2,3), "layout1 address is not two-thirds of original width");
           const auto header = HeaderGeometry({20, 50, UiPixels(width, dpi), 300}, dpi);
           Require(header.title.x + header.title.width <= header.pin.x &&
               header.pin.x + header.pin.width <= header.close.x,
@@ -133,6 +136,27 @@ int wmain(int argc, wchar_t** argv) {
         const auto single = ComputePaneLayout(UiPixels(1600, dpi), UiPixels(900, dpi), dpi, 40, panes, false);
         Require(single.right.x == LeftChromeInset(dpi) && single.right.width == UiPixels(500, dpi),
             "left gutter crops or resizes the saved game viewport");
+      }
+      for (unsigned dpi : {96U,144U,192U}) for (int room : {0,1,16,32,43,64,120,284,400}) {
+        const IconTabLayout tabs(UiPixels(room,dpi),UiPixels(34,dpi),dpi,8);
+        int previous = -1;
+        for (size_t i=0;i<8;++i) {
+          const auto r=tabs.Item(i);
+          Require(r.x>=previous && r.x+r.width<=UiPixels(room,dpi), "overlapping icon tab escapes its strip");
+          previous=r.x;
+        }
+        for (int x=0;x<UiPixels(room,dpi);++x) {
+          const int hit=tabs.Hit(x,UiPixels(17,dpi));
+          if (hit<0) continue;
+          const auto r=tabs.Item(static_cast<size_t>(hit));
+          Require(x>=r.x && x<r.x+r.width, "tab hit disagrees with painted rectangle");
+          for (size_t i=static_cast<size_t>(hit)+1;i<8;++i) {
+            const auto right=tabs.Item(i);
+            Require(x<right.x || x>=right.x+right.width, "covered tab wins over the right-hand tab");
+          }
+        }
+        Require(tabs.Hit(-1,0)==-1 && tabs.Hit(UiPixels(room,dpi),UiPixels(17,dpi))==-1,
+            "tab hit accepts blank or out-of-bounds strip");
       }
       Require(FrameEdge({-2,-2}, {0,0,800,600}, 5, false) == HTTOPLEFT &&
           FrameEdge({799,599}, {0,0,800,600}, 5, false) == HTBOTTOMRIGHT &&
@@ -570,6 +594,21 @@ int wmain(int argc, wchar_t** argv) {
       Require(saved.choice == gbrowser::ProxyAction::Acgpower && !saved.uncertain, "matched choice was not retained");
       state.BeginWrite(); state.NoWrite();
       Require(!state.state().uncertain && state.state().choice == saved.choice, "known no-write erased the successful choice");
+      const std::string custom="自用 \"节点\" & 💙";
+      state.Matched(gbrowser::ProxyAction::Custom,custom);
+      Require(ProxyPreference(data).state().custom_name==custom && ProxyPreference(data).state().choice==gbrowser::ProxyAction::Custom,
+          "custom profile selection was not retained");
+      state.BeginWrite();
+      Require(ProxyPreference(data).state().uncertain && ProxyPreference(data).state().custom_name==custom,
+          "unknown custom submission lost its selected name");
+      state.NoWrite();
+      const auto menu=DecodeProxyProfileMenu("SFPM1|"+ProxyProfileHex(custom)+"|646972656374,"+ProxyProfileHex(custom));
+      Require(menu.current==custom && menu.names.size()==2 && menu.names[1]==custom,"custom menu names roundtrip failed");
+      for (const auto* bad:{"SFPM1||646972656374,646972656374","SFPM1||00","SFPM1|ff|646972656374","SFPM1||646972656374,",
+          "SFPM1|61|646972656374","SFPM1||zz"}) {
+        rejected=false;try {DecodeProxyProfileMenu(bad);} catch (...) {rejected=true;}
+        Require(rejected,"invalid custom proxy menu accepted");
+      }
       for (const auto* bad : {"GBWV-PROXY-1\nacgpower 2\n", "GBWV-PROXY-1\ninitialize 0\n", "GBWV-PROXY-1\nnone 0\nextra"}) {
         rejected = false; try { DecodeProxyPreference(bad); } catch (const std::exception&) { rejected = true; }
         Require(rejected, "malformed proxy record accepted as authority");

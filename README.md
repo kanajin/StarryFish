@@ -21,8 +21,9 @@
 
 ## 功能
 
-- 两种布局：紧凑侧栏 / 经典双排工具栏；浅色天蓝、深色群青。
+- 两种布局：紧凑侧栏 / 经典双排工具栏；浅色天蓝、深色群青。两布局采用网页图标标签，空间不足时重叠排列；均提供刷新按钮。界面需求见 [UI_REQUIREMENTS.md](docs/UI_REQUIREMENTS.md)。
 - 独立用户资料、代理选择与窗口布局记忆。
+- 代理菜单读取 ZeroOmega 的自定义情景模式并支持切换，实际配置匹配的当前模式显示勾选。
 - 多标签，＋/Ctrl+T 新建，Ctrl+W 或中键关闭普通标签；固定 GBF 主标签保留。
 - 双游戏窗口；箭头点击一次把右侧当前网址同步到副窗，相同网址则刷新副窗。
 - 太郎与肉鸽侧栏支持开关、分隔调整及拆出窗口。
@@ -60,7 +61,7 @@ python -B build.py test
 python -B build.py verify
 python -B build.py package-setup
 cd ../..
-python -B tools/package_release.py 0.1.4
+python -B tools/package_release.py 0.1.5
 ```
 
 依赖从官方固定 URL 获取并验证 SHA256。太郎/肉鸽固定快照仅用于构建检查；终端用户首装仍解析上游最新版本。包输出在 `dist/`。推送 `main` 会构建并保留检查产物，推送 `v*` 标签会额外发布 GitHub Release；工作流不会访问或上传本地用户资料。发布新版本前需同时更新 `VERSION` 与 `RELEASE_NOTES.md`，标签版本必须与 `VERSION` 一致。

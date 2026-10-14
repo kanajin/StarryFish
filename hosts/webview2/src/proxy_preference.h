@@ -6,6 +6,7 @@ namespace gbrowser::webview {
 struct ProxyPreferenceState {
   std::optional<ProxyAction> choice;
   bool uncertain = false;
+  std::string custom_name;
 };
 ProxyAction DecodeInstallChoice(const std::string& bytes);
 std::string EncodeProxyPreference(const ProxyPreferenceState& state);
@@ -17,7 +18,7 @@ class ProxyPreference {
   explicit ProxyPreference(const std::filesystem::path& data);
   const ProxyPreferenceState& state() const { return state_; }
   void BeginWrite();
-  void Matched(ProxyAction action);
+  void Matched(ProxyAction action, const std::string& custom_name = {});
   void NoWrite();
  private:
   void Save(ProxyPreferenceState next);

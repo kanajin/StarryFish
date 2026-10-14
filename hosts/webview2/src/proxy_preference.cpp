@@ -1,4 +1,5 @@
 #include "proxy_preference.h"
+#include "proxy_profiles.h"
 #include <stdexcept>
 
 namespace gbrowser::webview {
@@ -20,9 +21,20 @@ ProxyAction DecodeInstallChoice(const std::string& bytes) {
   throw std::runtime_error("安装连接选择记录异常，请从代理菜单选择");
 }
 std::string EncodeProxyPreference(const ProxyPreferenceState& state) {
+  if (state.choice==ProxyAction::Custom) {
+    Require(ValidProxyProfileName(state.custom_name));
+    return "GBWV-PROXY-2\n" + ProxyProfileHex(state.custom_name) + (state.uncertain ? " 1\n" : " 0\n");
+  }
+  Require(state.custom_name.empty());
   return "GBWV-PROXY-1\n" + Name(state.choice) + (state.uncertain ? " 1\n" : " 0\n");
 }
 ProxyPreferenceState DecodeProxyPreference(const std::string& bytes) {
+  if (bytes.rfind("GBWV-PROXY-2\n",0)==0 && bytes.size()>16) {
+    const auto end=bytes.size()-3;
+    Require(bytes.substr(end)==" 0\n" || bytes.substr(end)==" 1\n");
+    ProxyPreferenceState state{ProxyAction::Custom,bytes[end+1]=='1',DecodeProxyProfileHex(std::string_view(bytes).substr(13,end-13))};
+    Require(EncodeProxyPreference(state)==bytes);return state;
+  }
   for (const auto choice : {std::optional<ProxyAction>{}, std::optional<ProxyAction>{ProxyAction::Acgpower},
       std::optional<ProxyAction>{ProxyAction::Direct}, std::optional<ProxyAction>{ProxyAction::Island}})
     for (bool uncertain : {false, true}) {
@@ -39,6 +51,6 @@ void ProxyPreference::Save(ProxyPreferenceState next) {
   try { file_.Save(bytes); state_ = next; } catch (...) { failed_ = true; throw; }
 }
 void ProxyPreference::BeginWrite() { Require(!state_.uncertain); auto next = state_; next.uncertain = true; Save(next); }
-void ProxyPreference::Matched(ProxyAction action) { Save({action, false}); }
+void ProxyPreference::Matched(ProxyAction action, const std::string& custom_name) { Save({action, false, custom_name}); }
 void ProxyPreference::NoWrite() { auto next = state_; next.uncertain = false; Save(next); }
 }

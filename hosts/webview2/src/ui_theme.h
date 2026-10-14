@@ -3,7 +3,11 @@
 #include <commctrl.h>
 #include <dwmapi.h>
 #include <objidl.h>
+#include <shlwapi.h>
+#include <wrl.h>
 #include <gdiplus.h>
+#include "icon_tabs.h"
+#include "tab_slots.h"
 #include <array>
 #include <filesystem>
 #include <memory>
@@ -12,7 +16,7 @@
 #include <algorithm>
 
 namespace gbrowser::webview {
-enum class UiIcon { None, Profile, Proxy, Tarou, Arcarum, Dual, Copy, Components, More, Arrow, Detach, Close, Minimize, Maximize, Restore, Reload, Plus };
+enum class UiIcon { None, Profile, Proxy, Tarou, Arcarum, Dual, Copy, Components, More, Arrow, Detach, Close, Minimize, Maximize, Restore, Reload, Plus, Page };
 struct UiPalette { COLORREF background, surface, hover, selected, ink, muted, accent, border; };
 inline UiPalette BluePalette(bool dark) {
   return dark ? UiPalette{RGB(23,37,64), RGB(32,50,80), RGB(16,29,52), RGB(49,78,119),
@@ -29,6 +33,7 @@ class UiTheme {
     SetDark(false);
   }
   ~UiTheme() {
+    for (auto& icon : tab_icons_) icon.Reset();
     for (auto& icon : icons_) icon.reset();
     DeleteObject(background_); DeleteObject(surface_);
     if (token_) Gdiplus::GdiplusShutdown(token_);
@@ -46,6 +51,29 @@ class UiTheme {
     if (!token_ || index >= icons_.size()) return;
     icons_[index].reset(Gdiplus::Bitmap::FromFile(path.c_str()));
     if (icons_[index] && icons_[index]->GetLastStatus() != Gdiplus::Ok) icons_[index].reset();
+  }
+  void ClearTabIcon(size_t index) { if (index < tab_icons_.size()) tab_icons_[index].Reset(); }
+  bool SetTabIcon(size_t index, IStream* source) {
+    if (index >= tab_icons_.size()) return false;
+    ClearTabIcon(index);
+    if (!token_ || !source) return false;
+    // Copy only bounded image bytes. Keep the private stream alive for GDI+;
+    // no website/icon URL, profile file or disk/network I/O enters paint.
+    STATSTG stat{};
+    if (FAILED(source->Stat(&stat, STATFLAG_NONAME)) || !stat.cbSize.QuadPart || stat.cbSize.QuadPart > 256 * 1024) return false;
+    LARGE_INTEGER start{};
+    if (FAILED(source->Seek(start, STREAM_SEEK_SET, nullptr))) return false;
+    std::vector<BYTE> bytes(static_cast<size_t>(stat.cbSize.QuadPart)); ULONG read = 0;
+    if (FAILED(source->Read(bytes.data(), static_cast<ULONG>(bytes.size()), &read)) || read != bytes.size()) return false;
+    auto& icon = tab_icons_[index];
+    icon.stream.Attach(SHCreateMemStream(bytes.data(), static_cast<UINT>(bytes.size())));
+    if (!icon.stream) return false;
+    icon.bitmap.reset(Gdiplus::Bitmap::FromStream(icon.stream.Get(), FALSE));
+    if (!icon.bitmap || icon.bitmap->GetLastStatus() != Gdiplus::Ok || !icon.bitmap->GetWidth() ||
+        !icon.bitmap->GetHeight() || icon.bitmap->GetWidth() > 256 || icon.bitmap->GetHeight() > 256) {
+      icon.Reset(); return false;
+    }
+    return true;
   }
   HBRUSH Control(HDC dc, bool input) const {
     SetTextColor(dc, palette_.ink); SetBkColor(dc, input ? palette_.surface : palette_.background);
@@ -115,6 +143,8 @@ class UiTheme {
       case UiIcon::Close: line(6,6,18,18); line(18,6,6,18); break;
       case UiIcon::Reload: g.DrawArc(&pen,5.f,5.f,14.f,14.f,40.f,285.f); line(19,4,19,10); line(19,10,13,10); break;
       case UiIcon::Plus: line(5,12,19,12); line(12,5,12,19); break;
+      case UiIcon::Page: g.DrawEllipse(&pen,3.f,3.f,18.f,18.f); g.DrawEllipse(&pen,8.f,3.f,8.f,18.f);
+        line(3,12,21,12); break;
       default: break;
     }
   }
@@ -157,37 +187,32 @@ class UiTheme {
     RECT text=draw.rcItem; text.left=icon.right+size/2;
     Text(draw.hDC,font,L"Tarou",text,palette_.ink,DT_LEFT);
   }
-  static RECT TabCloseRect(RECT rect, unsigned dpi) {
-    const int size = MulDiv(20, static_cast<int>(dpi), 96);
-    const int right = rect.right - MulDiv(8, static_cast<int>(dpi), 96);
-    const int top = rect.top + ((rect.bottom - rect.top) - size) / 2;
-    return {right - size, top, right, top + size};
-  }
-  void Tabs(HWND window, HDC dc, HFONT font, unsigned render_dpi = 0, bool browser_layout = false) const {
+  void Tabs(HWND window, HDC dc, const std::vector<size_t>& order, size_t selected, unsigned render_dpi = 0) const {
     RECT client{}; GetClientRect(window,&client); Background(dc,client);
-    const int count=TabCtrl_GetItemCount(window), selected=TabCtrl_GetCurSel(window);
-    const int dpi=static_cast<int>(render_dpi ? render_dpi : GetDpiForWindow(window));
-    for (int i=0;i<count;++i) {
-      RECT rect{}; if (!TabCtrl_GetItemRect(window,i,&rect)) continue;
-      const auto close = TabCloseRect(rect, static_cast<unsigned>(dpi));
-      // Stay inside the actual native hit rectangle, including its top/bottom.
-      // Mouse selection, middle close, tooltips and keyboard focus share it.
-      InflateRect(&rect,-2,-1);
-      wchar_t text[256]{}; TCITEMW item{}; item.mask=TCIF_TEXT; item.pszText=text; item.cchTextMax=256;
-      TabCtrl_GetItem(window,i,&item);
-      Round(dc,rect,MulDiv(9,dpi,96),i==selected?palette_.surface:palette_.background,
-          i==selected?palette_.border:palette_.background);
-      InflateRect(&rect,-MulDiv(10,dpi,96),0);
-      if (browser_layout && i > 0) { rect.right = close.left - MulDiv(4,dpi,96); Icon(dc,UiIcon::Close,close,palette_.muted); }
-      Text(dc,font,text,rect,i==selected?palette_.ink:palette_.muted,DT_LEFT);
-      if (i==selected && GetFocus()==window) { InflateRect(&rect,0,-4); DrawFocusRect(dc,&rect); }
+    const unsigned dpi=render_dpi ? render_dpi : GetDpiForWindow(window);
+    const IconTabLayout layout(client.right, client.bottom, dpi, order.size());
+    for (size_t i=0;i<order.size();++i) {
+      const auto item = layout.Item(i);
+      if (!item.width || !item.height) continue;
+      RECT rect{item.x, item.y, item.x+item.width, item.y+item.height};
+      Fill(dc,rect,palette_.background); // The right pill covers the left pill, irrespective of selection.
+      Round(dc,rect,MulDiv(8,static_cast<int>(dpi),96),order[i]==selected?palette_.surface:palette_.background,palette_.border);
+      const int size=MulDiv(16,static_cast<int>(dpi),96);
+      const int x=(rect.left+rect.right-size)/2,y=(rect.top+rect.bottom-size)/2;
+      const RECT image{x,y,x+size,y+size};
+      const int saved=SaveDC(dc); IntersectClipRect(dc,rect.left,rect.top,rect.right,rect.bottom);
+      auto* bitmap=order[i]<tab_icons_.size()?tab_icons_[order[i]].bitmap.get():nullptr;
+      if (bitmap && token_) {
+        Gdiplus::Graphics g(dc);g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+        g.DrawImage(bitmap,x,y,size,size);
+      } else Icon(dc,UiIcon::Page,image,palette_.muted);
+      RestoreDC(dc,saved);
+      if (order[i]==selected && GetFocus()==window && !(SendMessageW(window,WM_QUERYUISTATE,0,0)&UISF_HIDEFOCUS)) {
+        InflateRect(&rect,-3,-3);DrawFocusRect(dc,&rect);
+      }
     }
   }
   static void AttachButton(HWND window) { SetWindowSubclass(window,ButtonProc,91,0); }
-  static void ConfigureTabs(HWND window, unsigned dpi, bool browser_layout = false) {
-    SetWindowLongPtrW(window,GWL_STYLE,GetWindowLongPtrW(window,GWL_STYLE)|TCS_FIXEDWIDTH);
-    TabCtrl_SetItemSize(window,MulDiv(browser_layout ? 180 : 160,static_cast<int>(dpi),96),MulDiv(30,static_cast<int>(dpi),96));
-  }
   // Owner-drawn menu items retain native command IDs, keyboard navigation and text.
   struct MenuItem { std::wstring text; bool separator=false, checked=false; };
   std::vector<std::unique_ptr<MenuItem>> PrepareMenu(HMENU menu) const {
@@ -222,7 +247,7 @@ class UiTheme {
     // DT_EXPANDTABS preserves the existing shortcut labels without changing IDs.
     const auto old=SelectObject(draw.hDC,font);SetBkMode(draw.hDC,TRANSPARENT);SetTextColor(draw.hDC,palette_.ink);
     if (draw.itemState & (ODS_DISABLED | ODS_GRAYED)) SetTextColor(draw.hDC,palette_.muted);
-    DrawTextW(draw.hDC,data->text.c_str(),-1,&rect,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_EXPANDTABS);
+    DrawTextW(draw.hDC,data->text.c_str(),-1,&rect,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_EXPANDTABS|DT_NOPREFIX);
     if (data->checked) { rect=draw.rcItem;rect.right=rect.left+inset*3;Text(draw.hDC,font,L"✓",rect,palette_.accent); }
     SelectObject(draw.hDC,old);
   }
@@ -247,6 +272,12 @@ class UiTheme {
     return DefSubclassProc(w,m,wp,lp);
   }
   ULONG_PTR token_=0;
+  struct TabIcon {
+    Microsoft::WRL::ComPtr<IStream> stream;
+    std::unique_ptr<Gdiplus::Bitmap> bitmap;
+    void Reset() { bitmap.reset(); stream.Reset(); }
+  };
+  std::array<TabIcon,TabSlots::kViewCount> tab_icons_{};
   std::array<std::unique_ptr<Gdiplus::Bitmap>,3> icons_{};
   bool dark_=false;
   UiPalette palette_{};

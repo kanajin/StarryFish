@@ -22,6 +22,7 @@
 #include "profile_catalogue.h"
 #include "profile_dialog.h"
 #include "proxy_preference.h"
+#include "proxy_profiles.h"
 #include "bookmark_navigation.h"
 #include "convenience_layout.h"
 #include "game_copy.h"
@@ -48,7 +49,7 @@ using Microsoft::WRL::ComPtr;
 using namespace gbrowser;
 namespace {
 constexpr int kProxy = 101, kTarou = 102, kArcarum = 103, kHome = 104;
-constexpr int kAcgpower = 106, kDirect = 107, kIsland = 108, kProxySettings = 109;
+constexpr int kProxySettings = 109;
 constexpr int kCopy = 110;
 constexpr int kNewTab = 111, kExtensions = 113, kMenu = 114;
 constexpr int kDownloads = 115, kProfiles = 116, kReturnProfile = 117, kExit = 118;
@@ -58,6 +59,8 @@ constexpr int kMinimize = 127, kMaximize = 128, kSecondaryMenu = 129;
 constexpr int kLayout1 = 130, kLayout2 = 131, kReload = 134;
 constexpr int kCacheToggle = 135, kCacheInfo = 136, kCacheClear = 137;
 constexpr UINT kCacheResult = WM_APP + 10;
+constexpr UINT kProxyMenuReady = WM_APP + 11;
+constexpr int kProxyProfileFirst = 3000;
 constexpr UINT kShowNotice = WM_APP + 8;
 constexpr UINT kMeasureSecondaryMenu = WM_APP + 9;
 constexpr size_t kLeftGame = 4, kArcarumView = 5;
@@ -297,7 +300,7 @@ class Host {
     if (!window_) throw std::runtime_error("无法创建候选窗口");
     address_ = CreateWindowExW(0, L"EDIT", L"本地准备页", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
         0, 0, 10, 10, window_, nullptr, instance, nullptr);
-    tabs_ = CreateWindowW(WC_TABCONTROLW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | TCS_SINGLELINE | TCS_TOOLTIPS,
+    tabs_ = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | SS_NOTIFY,
         0, 0, 10, 10, window_, nullptr, instance, nullptr);
 
     divider_ = CreateWindowW(L"STATIC", L"", WS_CHILD | SS_NOTIFY | SS_GRAYRECT,
@@ -355,6 +358,13 @@ class Host {
         tool.uId = reinterpret_cast<UINT_PTR>(buttons_[i]); tool.lpszText = const_cast<wchar_t*>(names[i]);
         SendMessageW(tips, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tool));
       }
+    }
+    tabs_tip_ = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,
+        CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, window_, nullptr, instance, nullptr);
+    if (tabs_tip_) {
+      TOOLINFOW tool{sizeof(tool)}; tool.uFlags = TTF_IDISHWND | TTF_SUBCLASS; tool.hwnd = window_;
+      tool.uId = reinterpret_cast<UINT_PTR>(tabs_); tool.lpszText = LPSTR_TEXTCALLBACKW;
+      SendMessageW(tabs_tip_, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tool));
     }
     SetWindowPos(window_, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
     theme_.Window(window_); RefreshProfileTitle(); UpdateFont();
@@ -642,6 +652,19 @@ class Host {
               }
             }); return S_OK;
           }).Get(), &token));
+    if (index == 0 || (index >= gbrowser::webview::TabSlots::kFirst && !IsAuxiliary(index))) {
+      ComPtr<ICoreWebView2_15> favicon;
+      if (SUCCEEDED(core.As(&favicon))) {
+        const auto result = favicon->add_FaviconChanged(Callback<ICoreWebView2FaviconChangedEventHandler>(
+            [this, index, generation](ICoreWebView2*, IUnknown*) -> HRESULT {
+              if (!closing_ && CurrentView(index, generation)) {
+                ++favicon_epochs_[index]; RequestTabFavicon(index, generation);
+              }
+              return S_OK;
+            }).Get(), &token);
+        if (FAILED(result)) timings_.Mark("tab-favicon-event-unavailable");
+      }
+    }
     ComPtr<ICoreWebView2_2> document; Check(core.As(&document));
     Check(document->add_DOMContentLoaded(Callback<ICoreWebView2DOMContentLoadedEventHandler>(
         [this, index, generation](ICoreWebView2* sender, ICoreWebView2DOMContentLoadedEventArgs*) -> HRESULT {
@@ -1202,15 +1225,88 @@ class Host {
     // Existing profiles without a host record may already be correctly set.
     // Adopt only fresh matching readback, never silently choose on a mismatch.
     restore_fallback_ = saved.uncertain ? std::optional<ProxyAction>{} : saved.choice;
-    if (saved.choice) { StartProxy(*saved.choice, true); return; }
+    if (saved.choice) { StartProxy(*saved.choice, true, saved.custom_name); return; }
     if (saved.uncertain) return; // Never replay an uncertain first submission.
     gbrowser::webview::UserStateFile choice(root_ / L"install-choice.state");
     if (choice.bytes()) StartProxy(gbrowser::webview::DecodeInstallChoice(*choice.bytes()));
   }
-  void StartProxy(ProxyAction action, bool read_only = false) {
+  void ReadProxyMenu() {
+    if (closing_ || failed_ || !controller_ready_ || loaded_!=4) { Notice(L"ZeroOmega尚未就绪，请稍后再打开代理菜单");return; }
+    if (proxy_menu_loading_) return;
+    const auto source=WideToUtf8(ComText([&](LPWSTR* text){return views_[2].core->get_Source(text);}));
+    if (!pages_[0]->AllowsPage(source)) {Notice(L"ZeroOmega控制页已变化，请重新打开设置");return;}
+    proxy_menu_loading_=true;proxy_menu_generation_=document_generation_;proxy_menu_started_=GetTickCount64();
+    ++proxy_menu_request_;
+    const std::string url="\""+pages_[0]->url()+"\"";
+    const auto script=std::string(kProxyProfilesScript)+"("+url+");"+kProxyMenuScript+
+        "("+std::to_string(proxy_menu_request_)+","+url+");";
+    const auto result=views_[2].core->ExecuteScript(Utf8ToWide(script).c_str(),nullptr);
+    if (FAILED(result) || !SetTimer(window_,7,100,nullptr)) {
+      proxy_menu_loading_=false;Notice(L"情景模式列表未能读取，请稍后重试");
+    }
+  }
+  void PollProxyMenu() {
+    if (!proxy_menu_loading_ || proxy_menu_polling_) return;
+    if (closing_ || failed_ || !controller_ready_ || document_generation_!=proxy_menu_generation_ ||
+        GetTickCount64()-proxy_menu_started_>16000) {
+      proxy_menu_loading_=false;KillTimer(window_,7);
+      if (!closing_) Notice(L"情景模式列表未能读取，请在ZeroOmega设置中核对");return;
+    }
+    const auto request=proxy_menu_request_,generation=proxy_menu_generation_;
+    proxy_menu_polling_=true;++pending_;
+    const auto script=L"window.__starryfishProxyMenuTake ? window.__starryfishProxyMenuTake("+std::to_wstring(request)+L") : null";
+    const auto result=views_[2].core->ExecuteScript(script.c_str(),Callback<ICoreWebView2ExecuteScriptCompletedHandler>(
+        [this,request,generation](HRESULT error,LPCWSTR value) -> HRESULT {
+          --pending_;proxy_menu_polling_=false;
+          if (!closing_ && proxy_menu_loading_ && request==proxy_menu_request_ && generation==document_generation_) {
+            const std::wstring_view encoded=value?value:L"null";
+            if (FAILED(error) || encoded!=L"null") {
+              proxy_menu_loading_=false;KillTimer(window_,7);
+              try {
+                if (FAILED(error) || encoded.size()<2 || encoded.size()>70002 || encoded.front()!=L'"' || encoded.back()!=L'"')
+                  throw std::runtime_error("情景模式列表不可用");
+                proxy_menu_=gbrowser::webview::DecodeProxyProfileMenu(WideToUtf8(std::wstring(encoded.substr(1,encoded.size()-2))));
+                if (!PostMessageW(window_,kProxyMenuReady,static_cast<WPARAM>(request),0)) throw std::runtime_error("情景模式菜单不可用");
+              } catch (...) {Notice(L"情景模式列表未能读取，请在ZeroOmega设置中核对");}
+            }
+          }
+          Drain();return S_OK;
+        }).Get());
+    if (FAILED(result)) {--pending_;proxy_menu_polling_=false;proxy_menu_loading_=false;KillTimer(window_,7);
+      Notice(L"情景模式列表未能读取，请稍后重试");Drain();}
+  }
+  void ShowProxyMenu(uint64_t request) {
+    if (closing_ || failed_ || request!=proxy_menu_request_ || document_generation_!=proxy_menu_generation_ || !controller_ready_) return;
+    std::vector<std::string> names;
+    for (const auto* name:{"acgpower","direct","岛风go"})
+      if (std::find(proxy_menu_.names.begin(),proxy_menu_.names.end(),name)!=proxy_menu_.names.end()) names.emplace_back(name);
+    for (const auto& name:proxy_menu_.names) if (std::find(names.begin(),names.end(),name)==names.end()) names.push_back(name);
+    HMENU menu=CreatePopupMenu();if (!menu) {Notice(L"代理菜单未能打开");return;}
+    for (size_t i=0;i<names.size();++i) {
+      auto label=names[i]=="direct"?std::wstring(L"直连"):Utf8ToWide(names[i]);
+      if (label.size()>48) {label.resize(48);if (label.back()>=0xd800 && label.back()<=0xdbff) label.pop_back();label+=L"…";}
+      AppendMenuW(menu,MF_STRING|(names[i]==proxy_menu_.current?MF_CHECKED:0),kProxyProfileFirst+i,label.c_str());
+    }
+    AppendMenuW(menu,MF_SEPARATOR,0,nullptr);AppendMenuW(menu,MF_STRING,kProxySettings,L"ZeroOmega设置");
+    const auto menu_art=theme_.PrepareMenu(menu);
+    RECT button{};GetWindowRect(buttons_[1],&button);
+    const int selected=TrackPopupMenu(menu,TPM_RETURNCMD|TPM_RIGHTALIGN,button.right,button.bottom,0,window_,nullptr);
+    DestroyMenu(menu);
+    if (selected==kProxySettings) {Action(selected);return;}
+    if (selected<kProxyProfileFirst || static_cast<size_t>(selected-kProxyProfileFirst)>=names.size()) return;
+    if (closing_ || !controller_ready_ || document_generation_!=proxy_menu_generation_ || request!=proxy_menu_request_) return;
+    const auto& name=names[static_cast<size_t>(selected-kProxyProfileFirst)];
+    if (mode_==RunMode::Offline && name!="direct") {Notice(L"离线候选不启动联网代理");return;}
+    StartProxy(ProxyAction::Custom,false,name);
+  }
+  void StartProxy(ProxyAction action, bool read_only = false, std::string custom_name = {}) {
+    if (action==ProxyAction::Custom && !gbrowser::webview::ValidProxyProfileName(custom_name)) {
+      Notice(L"情景模式名称无法识别；现有配置保留");return;
+    }
     if (failed_) { Notice(L"当前候选已停止网络接续；请关闭后重新启动"); return; }
     if (!controller_ready_ || closing_ || loaded_ != 4) { Notice(L"代理控制页尚未就绪"); return; }
-    if (proxy_ && (proxy_->pending() || proxy_->state() == ProxyInitializationState::Unconfirmed)) {
+    if (proxy_ && (proxy_->pending() || (proxy_->state() == ProxyInitializationState::Unconfirmed &&
+        (read_only || !proxy_recorded_ || proxy_preference_->state().uncertain)))) {
       Notice(L"上一操作结果尚未确定；不会重复写入代理"); return;
     }
     if (!read_only && action != ProxyAction::Initialize && proxy_preference_->state().uncertain) {
@@ -1224,6 +1320,7 @@ class Host {
       }
     }
     restore_probe_ = read_only; proxy_recorded_ = false;
+    proxy_custom_name_ = std::move(custom_name);
     phase_ = read_only ? L"只读核对上次代理" : L"核对并应用本次代理选择";
     network_ready_ = false; ++cache_network_epoch_; ++cache_epoch_;
     proxy_started_ = GetTickCount64(); proxy_timed_ = false;
@@ -1233,9 +1330,10 @@ class Host {
         "webview2-candidate", GetTickCount64(), action);
     const auto url = pages_[0]->url();
     const std::string expected = "\"" + url + "\"";
-    std::string script = std::string(kProxyBridge) + "(" + std::to_string(operation_) + ',' + expected + ");" +
+    std::string script = std::string(kProxyProfilesScript) + "(" + expected + ");" + kProxyBridge + "(" + std::to_string(operation_) + ',' + expected + ");" +
         kProxyScript + "(" + std::to_string(operation_) + ',' + expected + ',' + std::string(InitialProxyOptions()) +
-        ",\"" + std::string(ProxyActionName(action)) + "\"," + (read_only ? "true" : "false") + ");";
+        ",\"" + std::string(ProxyActionName(action)) + "\"," + (read_only ? "true" : "false") +
+        ",\"" + gbrowser::webview::ProxyProfileHex(proxy_custom_name_) + "\");";
 
     Check(views_[2].core->ExecuteScript(Utf8ToWide(script).c_str(), nullptr));
     if (!SetTimer(window_, 2, 200, nullptr)) throw std::runtime_error("无法观察代理操作");
@@ -1288,7 +1386,7 @@ class Host {
                 const auto feedback = gbrowser::webview::ProxyFeedback(*proxy_, restore_probe_, restore_fallback_.has_value());
                 if (feedback == gbrowser::webview::ProxyUiResult::Matched) {
                   if (!proxy_recorded_ && proxy_->action() != ProxyAction::Initialize) {
-                    proxy_preference_->Matched(proxy_->action()); proxy_recorded_ = true;
+                    proxy_preference_->Matched(proxy_->action(),proxy_custom_name_); proxy_recorded_ = true;
                   }
                   if (!proxy_timed_) {
                     timings_.Mark("proxy-settings-readback-matched", proxy_started_); proxy_timed_ = true;
@@ -1692,17 +1790,36 @@ class Host {
   bool CurrentView(size_t index, uint64_t generation) const {
     return index < views_.size() && view_generations_[index] == generation && views_[index].core;
   }
+  void RequestTabFavicon(size_t index, uint64_t generation) {
+    if (closing_ || !CurrentView(index, generation) || favicon_loading_[index] ||
+        std::find(tab_order_.begin(), tab_order_.end(), index) == tab_order_.end()) return;
+    ComPtr<ICoreWebView2_15> core;
+    if (FAILED(views_[index].core.As(&core))) return;
+    const auto epoch = favicon_epochs_[index];
+    // Coalesce icon changes to one request per slot. A reused slot never accepts
+    // an old page's result, and closing/profile switch drains its callback.
+    favicon_loading_[index] = true; ++pending_;
+    const auto result = core->GetFavicon(COREWEBVIEW2_FAVICON_IMAGE_FORMAT_PNG,
+        Callback<ICoreWebView2GetFaviconCompletedHandler>(
+            [this, index, generation, epoch](HRESULT error, IStream* stream) -> HRESULT {
+              --pending_; favicon_loading_[index] = false;
+              if (!closing_ && CurrentView(index, generation) && favicon_epochs_[index] == epoch &&
+                  std::find(tab_order_.begin(), tab_order_.end(), index) != tab_order_.end()) {
+                try { theme_.SetTabIcon(index, SUCCEEDED(error) ? stream : nullptr); }
+                catch (...) { theme_.ClearTabIcon(index); }
+                InvalidateRect(tabs_, nullptr, FALSE);
+              }
+              if (!closing_ && (favicon_epochs_[index] != epoch || view_generations_[index] != generation))
+                RequestTabFavicon(index, view_generations_[index]);
+              Drain(); return S_OK;
+            }).Get());
+    if (FAILED(result)) { --pending_; favicon_loading_[index] = false; Drain(); }
+  }
   void RebuildTabs() {
     if (!tabs_) return;
-    TabCtrl_DeleteAllItems(tabs_);
-    for (size_t i = 0; i < tab_order_.size(); ++i) {
-      TCITEMW item{}; item.mask = TCIF_TEXT;
-      item.pszText = titles_[tab_order_[i]].data();
-      if (TabCtrl_InsertItem(tabs_, static_cast<int>(i), &item) == -1)
-        throw std::runtime_error("无法更新标签区");
-    }
-    const auto position = std::find(tab_order_.begin(), tab_order_.end(), active_);
-    TabCtrl_SetCurSel(tabs_, static_cast<int>(position - tab_order_.begin()));
+    SetWindowTextW(tabs_, titles_[active_].c_str());
+    tooltip_tab_ = -1;
+    if (tabs_tip_) SendMessageW(tabs_tip_, TTM_POP, 0, 0);
     // Publish the strip before Layout/MoveFocus/controller Close can occupy
     // this UI thread. Queued WM_PAINT otherwise leaves a deleted tab visible
     // after the adjacent WebView is already shown. Redraw only this control;
@@ -1781,6 +1898,7 @@ class Host {
     const auto index = ticket->index;
     view_generations_[index] = ticket->generation;
     settings_tabs_[index] = settings;
+    ++favicon_epochs_[index]; theme_.ClearTabIcon(index);
     titles_[index] = settings ? L"ZeroOmega设置" : L"新标签";
     drafts_[index] = false; draft_text_[index].clear();
     tab_order_.push_back(index);
@@ -1836,6 +1954,7 @@ class Host {
     if (item == tab_order_.end()) return;
     const auto position = static_cast<size_t>(item - tab_order_.begin());
     tab_order_.erase(item);
+    ++favicon_epochs_[index]; theme_.ClearTabIcon(index);
     if (active_ == index) SelectTab(tab_order_[(std::min)(position, tab_order_.size() - 1)]);
     else RebuildTabs();
   }
@@ -1906,16 +2025,16 @@ class Host {
     if (browser_layout_) {
       const auto browser = gbrowser::webview::BrowserToolbarGeometry(width, Dpi(), tab_order_.size());
       top = {browser.address, browser.copy, browser.tabs, browser.functions[5],
-          browser.minimize, browser.maximize, browser.close, browser.add};
-      move(buttons_[15], browser.reload);
+          browser.minimize, browser.maximize, browser.close, browser.add, browser.reload};
       const std::array<size_t, 7> actions{2, 3, 1, 4, 6, 0, 7};
       for (size_t i = 0; i < actions.size(); ++i) move(buttons_[actions[i]], browser.functions[i]);
     }
-    ShowWindow(buttons_[15], browser_layout_ ? SW_SHOWNA : SW_HIDE);
+    move(buttons_[15], top.reload); ShowWindow(buttons_[15], SW_SHOWNA);
     move(buttons_[16], top.add); ShowWindow(buttons_[16], SW_SHOWNA);
     auto address = top.address;
     address.x += px(7); address.y += px(4); address.width -= px(14); address.height -= px(8);
     move(address_, address); move(tabs_, top.tabs); move(buttons_[5], top.copy);
+    InvalidateRect(tabs_, nullptr, FALSE);
     move(buttons_[0], top.profile); move(buttons_[12], top.minimize);
     move(buttons_[13], top.maximize); move(buttons_[14], top.close);
     const int rail_x = layout.content.rail.x + px(4), rail_top = layout.content.rail.y;
@@ -2004,7 +2123,6 @@ class Host {
     if (!next) throw std::runtime_error("无法创建界面字体");
     for (HWND control : {address_, tabs_, tarou_title_}) SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(next), TRUE);
     for (HWND control : buttons_) SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(next), TRUE);
-    gbrowser::webview::UiTheme::ConfigureTabs(tabs_, Dpi(), browser_layout_);
     if (font_) DeleteObject(font_);
     font_ = next;
   }
@@ -2232,23 +2350,7 @@ class Host {
           L"StarryFish 指定组件", MB_OK | MB_ICONINFORMATION); return;
     }
     if (id == kProxy) {
-      HMENU menu = CreatePopupMenu();
-      if (!menu) throw std::runtime_error("无法创建代理菜单");
-      AppendMenuW(menu, MF_STRING, kAcgpower, L"acgpower");
-      AppendMenuW(menu, MF_STRING, kDirect, L"直连");
-      AppendMenuW(menu, MF_STRING, kIsland, L"岛风go");
-      AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-      AppendMenuW(menu, MF_STRING, kProxySettings, L"ZeroOmega设置");
-      const auto menu_art = theme_.PrepareMenu(menu);
-      RECT button{}; GetWindowRect(buttons_[1], &button);
-      const int selected = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTALIGN,
-          button.right, button.bottom, 0, window_, nullptr);
-      DestroyMenu(menu); if (selected) Action(selected); return;
-    }
-    if (id == kAcgpower || id == kDirect || id == kIsland) {
-      if (mode_ == RunMode::Offline && id != kDirect) { Notice(L"离线候选不启动联网代理"); return; }
-      StartProxy(id == kAcgpower ? ProxyAction::Acgpower : id == kDirect ? ProxyAction::Direct : ProxyAction::Island);
-      return;
+      ReadProxyMenu();return;
     }
     if (id == kHome) {
       if (mode_ == RunMode::Offline) {
@@ -2334,6 +2436,7 @@ class Host {
     KillTimer(window_, 2);
     KillTimer(window_, 3);
     KillTimer(window_, 4); KillTimer(window_, 5); split_layout_pending_ = false;
+    KillTimer(window_,7);proxy_menu_loading_=false;
     CloseLogin();
     for (size_t index = gbrowser::webview::TabSlots::kAuxFirst; index < views_.size(); ++index)
       Guard([&] { CloseAuxiliary(index, view_generations_[index]); });
@@ -2523,10 +2626,12 @@ class Host {
       host->CancelSplit();
     return DefSubclassProc(window, message, wparam, lparam);
   }
+  int TabPosition(HWND control, POINT point) const {
+    RECT rect{}; GetClientRect(control, &rect);
+    return gbrowser::webview::IconTabLayout(rect.right, rect.bottom, Dpi(), tab_order_.size()).Hit(point.x, point.y);
+  }
   std::optional<gbrowser::webview::TabSlots::Ticket> TabHit(HWND control, LPARAM point) const {
-    TCHITTESTINFO hit{};
-    hit.pt = {static_cast<short>(LOWORD(point)), static_cast<short>(HIWORD(point))};
-    const int position = TabCtrl_HitTest(control, &hit);
+    const int position = TabPosition(control, {static_cast<short>(LOWORD(point)), static_cast<short>(HIWORD(point))});
     if (position < 0 || static_cast<size_t>(position) >= tab_order_.size()) return {};
     const auto index = tab_order_[static_cast<size_t>(position)];
     if (!index) return {}; // Fixed game tab is intentionally ineligible.
@@ -2535,45 +2640,41 @@ class Host {
   static LRESULT CALLBACK TabProcedure(HWND window, UINT message, WPARAM wparam, LPARAM lparam,
                                       UINT_PTR subclass, DWORD_PTR reference) {
     auto host = reinterpret_cast<Host*>(reference);
-    const auto close_hit = [&]() -> std::optional<gbrowser::webview::TabSlots::Ticket> {
-      if (!host->browser_layout_) return {};
-      TCHITTESTINFO hit{}; hit.pt = {static_cast<short>(LOWORD(lparam)), static_cast<short>(HIWORD(lparam))};
-      const int index = TabCtrl_HitTest(window, &hit); RECT rect{};
-      if (index <= 0 || !TabCtrl_GetItemRect(window, index, &rect)) return {};
-      rect = gbrowser::webview::UiTheme::TabCloseRect(rect, host->Dpi());
-      return PtInRect(&rect, hit.pt) ? host->TabHit(window, lparam) : std::nullopt;
-    };
     if (message == WM_NCDESTROY) {
       host->tab_close_.Cancel(); RemoveWindowSubclass(window, TabProcedure, subclass);
     } else if (message == WM_NCHITTEST) {
       POINT point{static_cast<short>(LOWORD(lparam)), static_cast<short>(HIWORD(lparam))};
       ScreenToClient(window, &point);
-      TCHITTESTINFO hit{}; hit.pt = point;
       // Unoccupied tab-strip space remains a native drag/double-click region.
-      if (TabCtrl_HitTest(window, &hit) < 0) return HTTRANSPARENT;
+      if (host->TabPosition(window, point) < 0) return HTTRANSPARENT;
+      return HTCLIENT;
     } else if (message == WM_ERASEBKGND) { return 1;
     } else if (message == WM_PAINT) {
       PAINTSTRUCT paint{}; HDC dc = BeginPaint(window, &paint);
       RECT rect{}; GetClientRect(window, &rect);
       HDC buffer = CreateCompatibleDC(dc); HBITMAP bitmap = CreateCompatibleBitmap(dc, (std::max)(1L, rect.right), (std::max)(1L, rect.bottom));
       if (buffer && bitmap) {
-        const auto old = SelectObject(buffer, bitmap); host->theme_.Tabs(window, buffer, host->font_, 0, host->browser_layout_);
+        const auto old = SelectObject(buffer, bitmap); host->theme_.Tabs(window, buffer, host->tab_order_, host->active_);
         BitBlt(dc, 0, 0, rect.right, rect.bottom, buffer, 0, 0, SRCCOPY); SelectObject(buffer, old);
-      } else host->theme_.Tabs(window, dc, host->font_, 0, host->browser_layout_);
+      } else host->theme_.Tabs(window, dc, host->tab_order_, host->active_);
       if (bitmap) DeleteObject(bitmap); if (buffer) DeleteDC(buffer); EndPaint(window, &paint); return 0;
-    } else if (message == WM_LBUTTONDOWN && close_hit()) {
-      if (!host->closing_) {
-        host->tab_left_close_ = true; host->tab_close_.Down(close_hit()); SetCapture(window);
-        if (GetCapture() != window) { host->tab_left_close_ = false; host->tab_close_.Cancel(); }
+    } else if (message == WM_MOUSEMOVE) {
+      const int position = host->TabPosition(window, {static_cast<short>(LOWORD(lparam)), static_cast<short>(HIWORD(lparam))});
+      if (position != host->tooltip_tab_) {
+        host->tooltip_tab_ = position;
+        if (host->tabs_tip_) {
+          SendMessageW(host->tabs_tip_, TTM_POP, 0, 0);
+          SendMessageW(host->tabs_tip_, TTM_UPDATE, 0, 0);
+        }
       }
-      return 0;
-    } else if (message == WM_LBUTTONUP && host->tab_left_close_) {
-      const auto ticket = GetCapture() == window ? host->tab_close_.Up(close_hit()) : std::nullopt;
-      host->tab_left_close_ = false; host->tab_close_.Cancel(); if (GetCapture() == window) ReleaseCapture();
-      if (ticket) PostMessageW(host->window_, kCloseOrdinary, static_cast<WPARAM>(ticket->index), static_cast<LPARAM>(ticket->generation));
+    } else if (message == WM_LBUTTONDOWN) {
+      const int position = host->TabPosition(window, {static_cast<short>(LOWORD(lparam)), static_cast<short>(HIWORD(lparam))});
+      if (!host->closing_ && position >= 0) host->Guard([&] {
+        SendMessageW(window, WM_CHANGEUISTATE, MAKEWPARAM(UIS_SET, UISF_HIDEFOCUS), 0);
+        host->SelectTab(host->tab_order_[static_cast<size_t>(position)]);
+      });
       return 0;
     } else if (message == WM_MBUTTONDOWN) {
-      host->tab_left_close_ = false;
       if (!host->closing_) {
         host->tab_close_.Down(host->TabHit(window, lparam)); SetCapture(window);
         if (GetCapture() != window) host->tab_close_.Cancel();
@@ -2588,8 +2689,22 @@ class Host {
       return 0;
     } else if (message == WM_CAPTURECHANGED || message == WM_CANCELMODE ||
                (message == WM_KEYDOWN && wparam == VK_ESCAPE)) {
-      host->tab_left_close_ = false;
       host->tab_close_.Cancel(); if (GetCapture() == window) ReleaseCapture();
+    } else if (message == WM_GETDLGCODE) { return DLGC_WANTARROWS | DLGC_WANTCHARS;
+    } else if (message == WM_KEYDOWN && (wparam == VK_LEFT || wparam == VK_RIGHT || wparam == VK_HOME || wparam == VK_END)) {
+      if (!host->closing_) host->Guard([&] {
+        const auto current = static_cast<size_t>(std::find(host->tab_order_.begin(), host->tab_order_.end(), host->active_) - host->tab_order_.begin());
+        const auto count = host->tab_order_.size();
+        const auto next = wparam == VK_HOME ? size_t{0} : wparam == VK_END ? count - 1 :
+            (current + (wparam == VK_RIGHT ? 1 : count - 1)) % count;
+        SendMessageW(window, WM_CHANGEUISTATE, MAKEWPARAM(UIS_CLEAR, UISF_HIDEFOCUS), 0);
+        host->SelectTab(host->tab_order_[next], false); SetFocus(window);
+      });
+      return 0;
+    } else if (message == WM_KEYDOWN && (wparam == VK_RETURN || wparam == VK_SPACE)) {
+      if (!host->closing_) host->FocusActive(); return 0;
+    } else if (message == WM_SETFOCUS || message == WM_KILLFOCUS) {
+      InvalidateRect(window, nullptr, FALSE);
     }
     return DefSubclassProc(window, message, wparam, lparam);
   }
@@ -2652,8 +2767,7 @@ class Host {
         if (!child || child == window) return HTCAPTION;
         if (child == host->tabs_) {
           POINT tab_point = point; MapWindowPoints(window, child, &tab_point, 1);
-          TCHITTESTINFO hit{}; hit.pt = tab_point;
-          if (TabCtrl_HitTest(child, &hit) < 0) return HTCAPTION;
+          if (host->TabPosition(child, tab_point) < 0) return HTCAPTION;
         }
       }
       return HTCLIENT;
@@ -2761,10 +2875,11 @@ class Host {
         if (!host->closing_ && !host->failed_ && host->restore_probe_ &&
             host->operation_ == static_cast<uint64_t>(wparam) && host->proxy_ &&
             host->proxy_->state() == ProxyInitializationState::PreflightDifferent)
-          host->StartProxy(static_cast<ProxyAction>(lparam));
+          host->StartProxy(static_cast<ProxyAction>(lparam),false,host->proxy_custom_name_);
       }); return 0;
     }
     if (message == kCloseLogin) { host->CloseLogin(); return 0; }
+    if (message == kProxyMenuReady) {host->Guard([&]{host->ShowProxyMenu(static_cast<uint64_t>(wparam));});return 0;}
     if (message == kMeasureSecondaryMenu) {
       host->Guard([&] {
         if (!host->closing_ && !host->failed_ && host->panes_.dual &&
@@ -2805,13 +2920,13 @@ class Host {
     }
     if (message == WM_EXITSIZEMOVE) { host->SaveLayout(); return 0; }
     if (message == WM_CANCELMODE) { host->Guard([&] { host->CancelSplit(); }); }
-    if (message == WM_NOTIFY && reinterpret_cast<NMHDR*>(lparam)->hwndFrom == host->tabs_ &&
-        reinterpret_cast<NMHDR*>(lparam)->code == TCN_SELCHANGE) {
-      host->Guard([&] {
-        const int position = TabCtrl_GetCurSel(host->tabs_);
-        if (position >= 0 && static_cast<size_t>(position) < host->tab_order_.size())
-          host->SelectTab(host->tab_order_[static_cast<size_t>(position)]);
-      }); return 0;
+    if (message == WM_NOTIFY && reinterpret_cast<NMHDR*>(lparam)->hwndFrom == host->tabs_tip_ &&
+        reinterpret_cast<NMHDR*>(lparam)->code == TTN_GETDISPINFOW) {
+      POINT point{}; GetCursorPos(&point); ScreenToClient(host->tabs_, &point);
+      const int position = host->TabPosition(host->tabs_, point);
+      auto& tip = *reinterpret_cast<NMTTDISPINFOW*>(lparam);
+      tip.lpszText = position >= 0 ? host->titles_[host->tab_order_[static_cast<size_t>(position)]].data() : const_cast<wchar_t*>(L"");
+      return 0;
     }
     if (message == WM_COMMAND) {
       host->Guard([&] {
@@ -2835,6 +2950,7 @@ class Host {
     if (message == WM_CLOSE) { host->Close(); return 0; }
     if (message == WM_TIMER) {
       if (wparam == 6) host->CompleteCacheJobs();
+      if (wparam == 7) host->PollProxyMenu();
       if (wparam == 2) host->Guard([&] { host->PollProxy(); });
       if (wparam == 3) host->Guard([&] { host->PollGameTarget(); });
       if (wparam == 4) { KillTimer(window, 4); host->SaveLayout(); }
@@ -2883,6 +2999,8 @@ class Host {
   std::array<View, gbrowser::webview::TabSlots::kViewCount> views_;
   std::array<uint64_t, gbrowser::webview::TabSlots::kViewCount> view_generations_{};
   std::array<uint64_t, gbrowser::webview::TabSlots::kViewCount> navigation_epochs_{};
+  std::array<uint64_t, gbrowser::webview::TabSlots::kViewCount> favicon_epochs_{};
+  std::array<bool, gbrowser::webview::TabSlots::kViewCount> favicon_loading_{};
   std::array<HWND, gbrowser::webview::TabSlots::kAuxCount> auxiliary_windows_{};
   std::array<std::shared_ptr<const ExtensionPage>, gbrowser::webview::TabSlots::kAuxCount> auxiliary_pages_{};
   gbrowser::webview::TabSlots tab_slots_;
@@ -2907,13 +3025,18 @@ class Host {
   HWND window_ = nullptr, address_ = nullptr, login_window_ = nullptr;
   const wchar_t* notice_pending_ = nullptr;
   bool notice_open_ = false;
-  HWND tabs_ = nullptr, divider_ = nullptr;
+  HWND tabs_ = nullptr, tabs_tip_ = nullptr, divider_ = nullptr;
+  int tooltip_tab_ = -1;
   HFONT font_ = nullptr;
   std::array<HWND, 17> buttons_{};
   HANDLE browser_process_ = nullptr;
   UINT32 browser_pid_ = 0;
   std::unique_ptr<gbrowser::webview::ProxyPreference> proxy_preference_;
   std::optional<ProxyAction> restore_fallback_;
+  std::string proxy_custom_name_;
+  gbrowser::webview::ProxyProfileMenu proxy_menu_;
+  uint64_t proxy_menu_request_=0,proxy_menu_generation_=0,proxy_menu_started_=0;
+  bool proxy_menu_loading_=false,proxy_menu_polling_=false;
   bool restore_started_ = false, restore_probe_ = false, proxy_recorded_ = false;
   std::unique_ptr<ProxyInitialization> proxy_;
   uint64_t operation_ = 0, document_generation_ = 0;
@@ -2941,7 +3064,6 @@ class Host {
   std::unique_ptr<gbrowser::webview::UserStateFile> appearance_file_;
   std::unique_ptr<gbrowser::webview::UserStateFile> layout_choice_file_;
   bool browser_layout_ = false;
-  bool tab_left_close_ = false;
   bool controller_ready_ = false, polling_ = false, initialize_new_zero_ = false;
   bool proxy_timed_ = false;
   bool home_pending_ = true;

@@ -10,6 +10,7 @@ std::string_view ProxyActionName(ProxyAction action) {
     case ProxyAction::Direct: return "direct";
     case ProxyAction::Acgpower: return "acgpower";
     case ProxyAction::Island: return "岛风go";
+    case ProxyAction::Custom: return "custom";
   }
   throw std::runtime_error("Unknown proxy action");
 }

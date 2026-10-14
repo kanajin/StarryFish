@@ -147,6 +147,7 @@ def test():
     package.require(node is not None, 'use the existing Node runtime; do not install a new toolchain')
     subprocess.run([node, str(ROOT / 'checks/scripts.js')], check=True)
     subprocess.run([node, str(ROOT / 'checks/user_scripts.js')], check=True)
+    subprocess.run([node, str(ROOT / 'checks/proxy_profiles.cjs')], check=True)
     subprocess.run([node, str(APP / 'tests/proxy_initialization_js_tests.cjs')], check=True)
     directory = tempfile.mkdtemp(prefix='directory-check-', dir=BUILD)
     subprocess.run([str(BUILD / 'native/Release/NativeSourceChecks.exe'), directory], check=True)
@@ -368,6 +369,7 @@ def prepare_user_scripts(output):
 
 def generate_scripts():
     scripts = {'kProxyScript': APP / 'src/proxy_initialization.js', 'kProxyBridge': ROOT / 'src/proxy_bridge.js',
+               'kProxyProfilesScript': ROOT / 'src/proxy_profiles.js', 'kProxyMenuScript': ROOT / 'src/proxy_menu.js',
                'kTargetScript': ROOT / 'src/target_binding.js', 'kGameUiScript': ROOT / 'src/game_ui.js',
                'kArcarumBindingScript': ROOT / 'src/arcarum_binding.js', 'kPanePointerScript': ROOT / 'src/pane_pointer.js',
                'kGameRoleScript': ROOT / 'src/game_role.js'}
