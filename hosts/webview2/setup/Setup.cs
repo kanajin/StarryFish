@@ -45,6 +45,7 @@ internal sealed class Paths : IDisposable {
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern SafeFileHandle CreateFileW(string path, uint access, uint share, IntPtr security, uint creation, uint flags, IntPtr template);
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetFileInformationByHandle(SafeFileHandle handle, out Information info);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern uint GetFinalPathNameByHandleW(SafeFileHandle handle, StringBuilder result, uint capacity, uint flags);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetFileInformationByHandle(SafeFileHandle handle, int kind, ref int value, uint size);
     readonly List<IDisposable> held = new List<IDisposable>();
     internal static string Local(string path) {
         Rules.Need(Rules.Match(path, "[A-Za-z]:\\\\.*") && path.Length < 240 && Path.GetFullPath(path) == path, "Canonical local path required");
@@ -114,6 +115,38 @@ internal sealed class Paths : IDisposable {
         } catch { handle.Dispose(); throw; }
     }
     public void Dispose() { for (int i = held.Count - 1; i >= 0; --i) held[i].Dispose(); held.Clear(); }
+    internal static void RequireRegular(string path) {
+        Local(path);
+        using (var handle=CreateFileW(path,0x80,1,IntPtr.Zero,3,0x00200000,IntPtr.Zero)) {
+            Information info; Rules.Need(!handle.IsInvalid && GetFileInformationByHandle(handle,out info) && (info.Attributes & (0x10|0x400))==0 && info.Links==1,"文件包含链接或不是普通文件。");
+        }
+    }
+    internal static bool MissingFile(string path) {
+        Local(path);
+        using(var handle=CreateFileW(path,0x80,7,IntPtr.Zero,3,0x02200000,IntPtr.Zero)) {
+            if(handle.IsInvalid) { var error=Marshal.GetLastWin32Error(); Rules.Need(error==2 || error==3,"无法核实文件是否缺失，保留现场。"); return true; }
+            Information info; Rules.Need(GetFileInformationByHandle(handle,out info) && (info.Attributes & (0x10|0x400))==0 && info.Links==1,"文件类型或链接状态不符合清理要求。"); return false;
+        }
+    }
+    internal static void DeleteRegular(string path, Member expected = null) {
+        Local(path);
+        using (var handle = CreateFileW(path, 0x80010000, 1, IntPtr.Zero, 3, 0x00200000, IntPtr.Zero)) {
+            if (handle.IsInvalid) {
+                var error = Marshal.GetLastWin32Error(); if (error == 2) return;
+                throw new IOException("无法安全删除 "+Path.GetFileName(path)+"（系统错误 "+error+"），文件保留。");
+            }
+            Information info = new Information();
+            if (!GetFileInformationByHandle(handle, out info)) throw new IOException("无法核实待清理文件，文件保留。");
+            Rules.Need((info.Attributes & (0x10 | 0x400)) == 0 && info.Links == 1, "待清理文件包含链接或不是普通文件，文件保留。");
+            if (expected != null) {
+                Rules.Need(info.SizeHigh == 0 && info.SizeLow == expected.Bytes, "待清理文件已变化。");
+                using (var stream = new FileStream(handle, FileAccess.Read)) {
+                    using (var sha = SHA256.Create()) Rules.Need(Rules.Hex(sha.ComputeHash(stream)) == expected.Hash, "待清理文件身份已变化。");
+                    int deleted = 1; if (!SetFileInformationByHandle(handle, 4, ref deleted, 4)) throw new IOException("文件被占用或无法删除。");
+                }
+            } else { int deleted = 1; if (!SetFileInformationByHandle(handle, 4, ref deleted, 4)) throw new IOException("文件被占用或无法删除。"); }
+        }
+    }
     internal static void WriteNew(string path, byte[] bytes) {
         Local(path); Directory.CreateDirectory(Path.GetDirectoryName(path)); Local(path);
         using (var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None)) { stream.Write(bytes, 0, bytes.Length); stream.Flush(true); }
@@ -188,7 +221,7 @@ internal static class Installer {
             ",\"source_url\":" + Json.Quote(source.Url) + ",\"version\":" + Json.Quote(component.Version) + ",\"acquired_at_utc\":" + Json.Quote(DateTime.UtcNow.ToString("o")) +
             ",\"package_sha256\":" + Json.Quote(Rules.Hash(archive)) + ",\"runtime_tree_sha256\":" + Json.Quote(component.Tree) + ",\"files\":" + component.Files.Count +
             ",\"bytes\":" + component.Bytes + ",\"license_evidence\":[" + string.Join(",", licenses) +
-            "],\"source_identity\":\"PUBLIC_HTTPS_NOT_AUTHOR_SIGNATURE\",\"loading\":\"NOT_PERFORMED\",\"manual_update\":\"MANUAL_OVERWRITE_EXPLICIT_RELOAD\"}\n";
+            "],\"source_identity\":" + Json.Quote(source.Kind == "LOCAL_USER_ARCHIVE" ? "USER_SELECTED_LOCAL_ZIP_NOT_AUTHOR_SIGNATURE" : "PUBLIC_HTTPS_NOT_AUTHOR_SIGNATURE") + ",\"loading\":\"NOT_PERFORMED\",\"manual_update\":\"MANUAL_OVERWRITE_EXPLICIT_RELOAD\"}\n";
         Paths.WriteNew(Path.Combine(root, "InstallEvidence", role + "-record.json"), Encoding.UTF8.GetBytes(record));
         Paths.WriteNew(Path.Combine(root, "InstallEvidence", role + ".zip"), archive);
     }
@@ -227,6 +260,7 @@ internal static class Installer {
         // Keep path-derived extension IDs stable for the later explicit manual
         // overwrite/reload workflow. A second first install still cannot reset it.
         var destination = SetupOptions.ValidateDestination(options.Destination); SetupOptions.ValidateProxy(options.Proxy);
+        options.ValidateHelpers();
         Rules.Need((!Directory.Exists(destination) || !Directory.EnumerateFileSystemEntries(destination).Any()) && !File.Exists(destination), "Existing installation retained; no overwrite or reset");
         using (var packageGuards = new Paths()) {
             packageGuards.Ancestors(package);
@@ -235,9 +269,7 @@ internal static class Installer {
             var components = new List<CheckedPackage> { FixedZero(package, packageGuards) };
             foreach (var role in new[] { "tarou", "arcarum-dungeon" }) {
                 if (progress != null) progress(role == "tarou" ? "正在获取太郎安装包…" : "正在获取肉鸽安装包…");
-                Console.WriteLine(role + ": resolving source..."); var source = PublicSource.Resolve(role, PublicSource.Fetch);
-                Console.WriteLine(role + ": downloading the resolved package..."); var bytes = PublicSource.Fetch(source.Url, source.Size == 0 ? Rules.ArchiveLimit : source.Size);
-                Rules.Need(bytes.Length >= 22 && (source.Size == 0 || source.Size == bytes.Length) && (source.Hash == null || Rules.Hash(bytes) == source.Hash), "Downloaded asset identity mismatch");
+                Source source; byte[] bytes = AcquireHelper(options, role, PublicSource.Fetch, out source);
                 Console.WriteLine(role + ": checking ZIP/manifest/content..."); var checkedPackage = Archive.Inspect(bytes, role, source);
                 if (progress != null) progress(role == "tarou" ? "正在核对并解压太郎…" : "正在核对并解压肉鸽…");
                 PublishComponent(staging, role, checkedPackage); Record(staging, role, source, bytes, checkedPackage); components.Add(checkedPackage);
@@ -264,13 +296,29 @@ internal static class Installer {
         Console.WriteLine("Source files ready. Native loading will be performed by the new candidate: " + destination);
         return destination;
     }
+    internal static byte[] AcquireHelper(SetupOptions options, string role, Func<string, int, byte[]> fetch, out Source source) {
+        if (options.LocalHelpers) {
+            var path = SetupOptions.ValidateZip(role == "tarou" ? options.TarouZip : options.ArcarumZip);
+            using (var read = new Paths()) {
+                read.Ancestors(Path.GetDirectoryName(path));
+                var bytes = read.Read(path, Rules.ArchiveLimit);
+                Rules.Need(bytes.Length >= 22, "本地 ZIP 文件不完整。");
+                source = new Source { Repository = PublicSource.Repository(role), Kind = "LOCAL_USER_ARCHIVE", Tag = "", Url = "", Size = bytes.Length, Hash = Rules.Hash(bytes) };
+                return bytes;
+            }
+        }
+        source = PublicSource.Resolve(role, fetch);
+        var downloaded = fetch(source.Url, source.Size == 0 ? Rules.ArchiveLimit : source.Size);
+        Rules.Need(downloaded.Length >= 22 && (source.Size == 0 || source.Size == downloaded.Length) && (source.Hash == null || Rules.Hash(downloaded) == source.Hash), "Downloaded asset identity mismatch");
+        return downloaded;
+    }
 }
 internal static class Program {
     [STAThread]
     static int Main(string[] args) {
         // Keep exact CLI commands headless. Double-clicked installs retain a
         // readable result window; exact maintenance commands remain available.
-        if (args.Length == 1 && args[0] == "--uninstall") return SetupWindow.Run((options, progress) => Integration.Uninstall(false), true);
+        if (args.Length == 1 && args[0] == "--uninstall") return SetupWindow.Run((options, progress) => Integration.Uninstall(), true);
         return args.Length == 0 ? SetupWindow.Run((options, progress) => Execute(args, progress, options)) : Execute(args).Code;
     }
     internal static SetupResult Execute(string[] args, Action<string> progress = null, SetupOptions options = null) {
@@ -281,7 +329,7 @@ internal static class Program {
             var package = EmbeddedPackage.Open();
             if (args.Length == 1 && args[0] == "--reload-helpers") {
                 phase = "ACCEPT_MANUALLY_REPLACED_HELPERS"; Installer.Inspect(package);
-                ManualReload.Accept(Installer.Destination()); return new SetupResult(0, "助手源树已核对，下一次启动使用正式接口加载。");
+                ManualReload.Accept(Installer.Destination()); Integration.Capture(Installer.Destination()); return new SetupResult(0, "助手源树已核对，下一次启动使用正式接口加载。");
             }
             if (args.Length == 1 && args[0] == "--inspect") { Installer.Inspect(package); Console.WriteLine("PASS fixed setup inventory; no network/install/browser/profile performed"); return new SetupResult(0, "安装包文件核对完成；未安装或启动。"); }
             destination = options == null ? Installer.Destination() : SetupOptions.ValidateDestination(options.Destination);
@@ -317,6 +365,11 @@ internal static class Program {
                 "程序文件已安装在：\r\n" + destination + "\r\n浏览器未能启动：" + error.Message + "\r\n请保留安装目录，之后直接启动 StarryFish.exe；不必重新下载助手。" :
                 "本次操作停止（" + phase + "）：" + error.Message + "\r\n现有安装和资料保留；若有失败暂存也保留。请保留现场，不自动重试或回滚。";
             Console.Error.WriteLine(message); return new SetupResult(1, message);
+        } finally {
+            // Only the exact extraction created by this invocation, never the
+            // user's downloaded installer/ZIP or a failed install staging tree.
+            if (EmbeddedPackage.OwnedRoot!=null) try { CleanUninstall.RemovePackage(EmbeddedPackage.OwnedRoot); }
+                catch (IOException) { Console.Error.WriteLine("Temporary verified installer payload could not be fully cleared; unknown files retained."); }
         }
     }
 }

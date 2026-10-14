@@ -7,6 +7,18 @@ internal sealed class SetupOptions {
     internal string Destination;
     internal string Proxy;
     internal bool Launch;
+    internal bool LocalHelpers;
+    internal string TarouZip, ArcarumZip;
+    internal static string ValidateZip(string text) {
+        Rules.Need(!string.IsNullOrWhiteSpace(text), "请选择太郎和肉鸽的 ZIP 文件。");
+        var path = Paths.Local(Path.GetFullPath(text.Trim()));
+        Rules.Need(Path.GetExtension(path).Equals(".zip", StringComparison.OrdinalIgnoreCase) && File.Exists(path), "请选择已有的本地 ZIP 文件。");
+        return path;
+    }
+    internal void ValidateHelpers() {
+        if (!LocalHelpers) return;
+        TarouZip = ValidateZip(TarouZip); ArcarumZip = ValidateZip(ArcarumZip);
+    }
     internal static string ValidateDestination(string text) {
         var path = Paths.Local(Path.GetFullPath(text.Trim()).TrimEnd('\\'));
         Rules.Need(path.Length <= 120 && Path.GetPathRoot(path).TrimEnd('\\') != path, "请选择专用的 StarryFish 安装文件夹，不要选择磁盘根目录；路径请短于120个字符。");

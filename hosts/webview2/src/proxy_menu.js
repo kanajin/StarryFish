@@ -3,7 +3,7 @@
   const state={request,value:null};window.__starryfishProxyMenu=state;
   window.__starryfishProxyMenuTake=serial => helper.sameDocument() && serial===state.request ? state.value : null;
   const replied=submit => new Promise((resolve,reject) => {
-    let settled=false;const timer=setTimeout(()=> {if (!settled) {settled=true;reject(new Error('unavailable'));}},5000);
+    let settled=false;const timer=setTimeout(()=> {if (!settled) {settled=true;reject(new Error('unavailable'));}},60000);
     const finish=(error,value) => {if (settled) return;settled=true;clearTimeout(timer);error?reject(new Error('unavailable')):resolve(value);};
     try {submit(finish);} catch (_) {finish(true);}
   });

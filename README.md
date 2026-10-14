@@ -10,10 +10,12 @@
 
 ## 下载与安装
 
+v0.1.6 新增离线插件选择与清洁卸载，等待超时延长至60秒。
+
 在 [Releases](https://github.com/kanajin/StarryFish/releases/latest) 下载 **StarryFish-版本-windows-x64-setup.exe**，直接运行单个安装器，无需解压。
 
 - Windows 10/11 x64；需要 Microsoft .NET Framework 4.8，以及 **稳定版 WebView2 Runtime 154 或更高**。安装器会检查版本，缺失时停止并提示；[微软官方下载](https://developer.microsoft.com/microsoft-edge/webview2/)。
-- 安装过程需要网络，自动从上游获取太郎、肉鸽并加载；ZeroOmega 使用固定版本随包提供。安装器遵循当前 Windows 用户的系统代理及绕过规则，请先启用代理客户端的“系统代理”，再启动安装器；浏览器内的 ZeroOmega 配置不控制安装器。
+- 首次安装可联网获取太郎、肉鸽，或选择自己下载的两个本地 ZIP 离线接入；两种方式都核对压缩包、插件角色、权限和资源，原 ZIP 保留。ZeroOmega 固定版本随包提供。联网下载遵循 Windows 系统代理及绕过规则，连接/读取超时为60秒；浏览器内 ZeroOmega 不控制安装器下载。
 - 安装向导中选择安装路径（必须可写且为空，或已有本程序安装）；创建当前用户开始菜单快捷方式，安装后可按 Win+S 搜索 **StarryFish**。已有安装更新时保持原路径。
 - 安装时选择 **acgpower / 岛风go / 直连**。使用加速器时先启动并启用它；新资料首次启动按此选择核对实际配置，再进入 GBF。已有资料保留自己的成功选择。浏览器不提供代理服务。Mobage 登录、验证码由本人处理。
 - 首发包未做商业代码签名；可用 Release 的 `SHA256SUMS.txt` 核对下载完整性。不要关闭系统安全功能。
@@ -41,7 +43,7 @@
 
 ## 卸载
 
-先正常关闭 StarryFish，再从 Windows“已安装的应用”、Geek 的程序列表或开始菜单“卸载 StarryFish”进入卸载向导。登记采用当前用户标准卸载项；Geek 列表显示尚待实际反馈。默认保留登录态与个人配置；只有勾选“同时删除个人数据”并确认才删除此安装的资料。额外添加或修改的文件保留，不删除其他安装的资料。安装器维护缓存及旧版本的诊断证据可能保留。
+先正常关闭 StarryFish，再从 Windows“已安装的应用”、Geek 的程序列表或开始菜单“卸载 StarryFish”进入卸载向导。确认后清除此安装的程序、登录态、配置、运行缓存及有归属记录的维护文件；关闭卸载窗口后自动清理开始菜单入口、安装器缓存和卸载器自身。卸载按文件身份与安装归属执行，安装目录中无关文件、被替换后无法核实的文件及其他安装的资料保留。遇到占用、链接或归属异常会停止并提示，不能将安装根整体删除。详情见 [安装与卸载需求](docs/INSTALLATION_REQUIREMENTS.md)。
 
 ## 隐私与联网
 
@@ -61,10 +63,10 @@ python -B build.py test
 python -B build.py verify
 python -B build.py package-setup
 cd ../..
-python -B tools/package_release.py 0.1.5
+python -B tools/package_release.py 0.1.6
 ```
 
-依赖从官方固定 URL 获取并验证 SHA256。太郎/肉鸽固定快照仅用于构建检查；终端用户首装仍解析上游最新版本。包输出在 `dist/`。推送 `main` 会构建并保留检查产物，推送 `v*` 标签会额外发布 GitHub Release；工作流不会访问或上传本地用户资料。发布新版本前需同时更新 `VERSION` 与 `RELEASE_NOTES.md`，标签版本必须与 `VERSION` 一致。
+依赖从官方固定 URL 获取并验证 SHA256。太郎/肉鸽固定快照仅用于构建检查；终端用户首装可解析上游最新版本，或选择两个本地 ZIP。包输出在 `dist/`。推送 `main` 会构建并保留检查产物，推送 `v*` 标签会额外发布 GitHub Release；工作流不会访问或上传本地用户资料。发布新版本前需同时更新 `VERSION` 与 `RELEASE_NOTES.md`，标签版本必须与 `VERSION` 一致。
 
 ## 许可与致谢
 

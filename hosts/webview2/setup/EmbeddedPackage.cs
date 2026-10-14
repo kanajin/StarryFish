@@ -7,6 +7,8 @@ using System.Text;
 
 namespace Gbrowser.Setup {
 internal static class EmbeddedPackage {
+    internal static string OwnedRoot;
+    internal static Member CopiedSetup;
     internal static string Open() {
         var assembly = Assembly.GetExecutingAssembly();
         using (var resource = assembly.GetManifestResourceStream("StarryFish.Payload.zip")) {
@@ -15,6 +17,7 @@ internal static class EmbeddedPackage {
             if (resource == null) return Paths.Local(AppDomain.CurrentDomain.BaseDirectory.TrimEnd('\\'));
             var parent = Paths.Local(Path.Combine(Path.GetTempPath().TrimEnd('\\'), "StarryFishSetup"));
             var root = Paths.Local(Path.Combine(parent, Guid.NewGuid().ToString("N")));
+            OwnedRoot = root;
             using (var guards = new Paths()) {
                 guards.CreateTree(root);
                 using (var zip = new ZipArchive(resource, ZipArchiveMode.Read)) {
@@ -35,7 +38,9 @@ internal static class EmbeddedPackage {
                         guards.CreateTree(Path.GetDirectoryName(target)); Paths.WriteNew(target, bytes);
                     }
                 }
-                Paths.WriteNew(Path.Combine(root, "StarryFishSetup.exe"), guards.Read(assembly.Location, 64 * 1024 * 1024));
+                var setupBytes=guards.Read(assembly.Location,64*1024*1024);
+                CopiedSetup=new Member(Path.Combine(root,"StarryFishSetup.exe"),setupBytes.Length,Rules.Hash(setupBytes));
+                Paths.WriteNew(CopiedSetup.Name,setupBytes);
                 Paths.WriteNew(Path.Combine(root, "setup-record.json"), Encoding.ASCII.GetBytes("{\"kind\":\"embedded-verified-payload\"}\n"));
             }
             return root;

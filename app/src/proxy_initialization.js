@@ -94,7 +94,7 @@
     let settled = false;
     const timeout = setTimeout(() => {
       if (!settled) { settled = true; reject(new Error('reply timed out')); }
-    }, 15000);
+    }, 60000);
     const finish = (error, result) => {
       if (settled) return;
       settled = true; clearTimeout(timeout);
@@ -125,7 +125,7 @@
     c => '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0'));
   const readLocalPac = async () => {
     const abort = new AbortController();
-    const timeout = setTimeout(() => abort.abort(), 15000);
+    const timeout = setTimeout(() => abort.abort(), 60000);
     let reader;
     try {
       const response = await fetch(expected['+acgpower'].pacUrl,

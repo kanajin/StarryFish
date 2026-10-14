@@ -13,12 +13,12 @@ internal static class SetupChecks {
         bool failed = false; try { action(); } catch (InvalidDataException) { failed = true; } catch (IOException) { failed = true; } catch (EncoderFallbackException) { failed = true; } catch (System.Security.Cryptography.CryptographicException) { failed = true; }
         Rules.Need(failed, "Failed rejection: " + name); ++passed;
     }
-    static byte[] Zip(string manifest, string extra = null) {
+    static byte[] Zip(string manifest, string extra = null, bool tarou = false) {
         using (var memory = new MemoryStream()) {
             using (var zip = new ZipArchive(memory, ZipArchiveMode.Create, true)) {
                 foreach (var item in new Dictionary<string, string> {
                     {"fixture/manifest.json", manifest}, {"fixture/worker.js", "console.log('synthetic');"},
-                    {"fixture/src/panel/index.html", "<!doctype html><title>synthetic</title>"}}) {
+                    {tarou ? "fixture/src/views/sidePanel/main.html" : "fixture/src/panel/index.html", "<!doctype html><title>synthetic</title>"}}) {
                     using (var stream = zip.CreateEntry(item.Key).Open()) { var bytes = Encoding.UTF8.GetBytes(item.Value); stream.Write(bytes, 0, bytes.Length); }
                 }
                 if (extra != null) using (var stream = zip.CreateEntry(extra).Open()) stream.WriteByte(1);
@@ -121,7 +121,8 @@ internal static class SetupChecks {
             UpdateChecks(root, Paths.Local(args[1]), valid);
             FirstPublicationChecks(root);
             SystemProxyChecks();
-            IntegrationChecks(root, Paths.Local(args[1]), valid);
+            Console.WriteLine("Checking owned/unrelated-file uninstall boundaries..."); IntegrationChecks(root, Paths.Local(args[1]), valid);
+            Console.WriteLine("Checking offline acquisition and cleanup recovery..."); OfflineAndCleanupChecks(root,Paths.Local(args[1]),valid);
             File.WriteAllText(Path.Combine(root, "result.txt"), "PASS " + passed + " setup source/archive/filesystem boundary checks\nNO_NETWORK_INSTALL_BROWSER_PROFILE\n");
             Console.WriteLine("PASS " + passed + " setup source/archive/filesystem boundary checks; network/install/browser NOT_RUN"); return 0;
         } catch (Exception error) { Console.Error.WriteLine("FAIL setup source checks: " + error.Message); return 1; }
@@ -162,6 +163,66 @@ internal static class SetupChecks {
         var syntheticData = Path.Combine(root, "DeleteDataFixture"); Directory.CreateDirectory(Path.Combine(syntheticData, "Nested"));
         File.WriteAllText(Path.Combine(syntheticData, "Nested", "synthetic.txt"), "synthetic only");
         Integration.DeleteDataTree(syntheticData); Rules.Need(!Directory.Exists(syntheticData), "Explicit data deletion"); ++passed;
+    }
+    [System.Runtime.InteropServices.DllImport("kernel32.dll",CharSet=System.Runtime.InteropServices.CharSet.Unicode,SetLastError=true)]
+    static extern bool CreateHardLinkW(string link, string existing, IntPtr security);
+    static void OfflineAndCleanupChecks(string root, string payload, CheckedPackage arcarum) {
+        var local=Path.Combine(root,"OfflineZip"); Directory.CreateDirectory(local);
+        var tarouPath=Path.Combine(local,"tarou.zip"); var arcarumPath=Path.Combine(local,"arcarum.zip");
+        Paths.WriteNew(tarouPath,Zip(Manifest.Replace("arcarum-dungeon","Tarou"),null,true)); Paths.WriteNew(arcarumPath,Zip(Manifest));
+        var options=new SetupOptions { LocalHelpers=true,TarouZip=tarouPath,ArcarumZip=arcarumPath }; options.ValidateHelpers(); ++passed;
+        foreach (var role in new[]{"tarou","arcarum-dungeon"}) {
+            Source source; var bytes=Installer.AcquireHelper(options,role,(url,limit)=>{throw new InvalidDataException("Offline mode used the network");},out source);
+            var component=Archive.Inspect(bytes,role,source); Rules.Need(source.Kind=="LOCAL_USER_ARCHIVE" && source.Url=="" && component.Files.ContainsKey("manifest.json"),"Offline acquisition identity"); ++passed;
+            Reject(()=>Archive.Inspect(bytes,role=="tarou"?"arcarum-dungeon":"tarou",source),"Offline ZIP role confusion");
+        }
+        Reject(()=>SetupOptions.ValidateZip(""),"Missing offline package");
+        Reject(()=>SetupOptions.ValidateZip(Path.Combine(local,"missing.zip")),"Missing ZIP");
+        Reject(()=>Archive.Inspect(Zip(Manifest.Replace("\"storage\"","\"management\"")),"arcarum-dungeon",new Source {Kind="LOCAL_USER_ARCHIVE"}),"Offline permissions unchanged");
+        var application=Fixture(Path.Combine(root,"c"),payload,arcarum);
+        Paths.WriteNew(Path.Combine(application,ApplicationOwner.Name),ApplicationOwner.Encode(application,new string('b',64),ApplicationUpdate.CurrentFiles()));
+        Integration.Capture(application);
+        ApplicationUpdate.ApplyChecked(payload,application);
+        Integration.Capture(application);
+        var historyRoot=Path.Combine(application,"ApplicationUpdateEvidence");
+        var historyFolder=Directory.EnumerateDirectories(historyRoot).Single();
+        var historyNote=Path.Combine(historyFolder,"my-own-note.txt"); Paths.WriteNew(historyNote,new byte[]{9});
+        var unknown=Path.Combine(application,"my-own-document.txt"); Paths.WriteNew(unknown,new byte[]{9});
+        var cache=Path.Combine(application,"Cache","Static-v1"); Directory.CreateDirectory(cache);
+        var url=Encoding.ASCII.GetBytes("https://game.granbluefantasy.jp/assets/fixture.png");
+        var headers="Content-Type: image/png\r\n";
+        var body=Encoding.ASCII.GetBytes("0 100 "+url.Length+" "+headers.Length+" 4\n"+Encoding.ASCII.GetString(url)+headers+"body");
+        var entry=Encoding.ASCII.GetBytes("STARRYFISH-CACHE-1\n"+Rules.Hash(body)+"\n").Concat(body).ToArray();
+        var cachePath=Path.Combine(cache,Rules.Hash(url)+".sfc"); Paths.WriteNew(cachePath,entry);
+        var unknownCache=Path.Combine(cache,new string('a',64)+".sfc"); Paths.WriteNew(unknownCache,new byte[]{9});
+        using (var guard=new Paths()) Rules.Need(Integration.StaticFiles(application,guard).Count==1,"Cache ownership consumed an unrelated file"); ++passed;
+        Reject(()=>Paths.DeleteRegular(unknown,new Member(unknown,1,Rules.Hash(new byte[]{8}))),"Deletion rechecks bytes");
+        var linked=Path.Combine(cache,Rules.Hash(url)+".tmp");
+        Rules.Need(CreateHardLinkW(linked,cachePath,IntPtr.Zero),"Create synthetic cache hardlink");
+        Reject(()=>Integration.RemoveOwned(application),"Cache hardlinks stop before deletion");
+        Rules.Need(File.Exists(Path.Combine(application,"StarryFish.exe")) && File.Exists(cachePath),"Preflight mutated before rejecting hardlink"); ++passed;
+        File.Delete(linked);
+        var originalInventory=File.ReadAllBytes(Path.Combine(application,Integration.Inventory));
+        Integration.RemoveOwned(application);
+        Rules.Need(!File.Exists(cachePath) && File.Exists(unknownCache) && File.Exists(unknown),"Owned/unrelated cache cleanup"); ++passed;
+        var history=Path.Combine(application,"ApplicationUpdateEvidence");
+        Rules.Need(File.Exists(historyNote) && Directory.EnumerateFiles(history,"*",SearchOption.AllDirectories).Count()==1,"History cleanup removed unrelated file or kept owned evidence"); ++passed;
+        var hash=new string('a',64); var cacheMember=new Member(Path.Combine(CleanUninstall.CacheRoot(application),hash.Substring(0,16),"StarryFishSetup.exe"),1,hash);
+        var envelope=CleanUninstall.Encode(application,new[]{cacheMember}); Rules.Need(CleanUninstall.Decode(application,envelope).Count==1,"Maintenance ownership parity"); ++passed;
+        CleanUninstall.RecoverOwnership(application,originalInventory,envelope);
+        Rules.Need(File.ReadAllBytes(Path.Combine(application,Integration.Inventory)).SequenceEqual(originalInventory) && File.ReadAllBytes(Path.Combine(application,CleanUninstall.Ledger)).SequenceEqual(envelope),"Partial uninstall lost authenticated retry ownership"); ++passed;
+        Reject(()=>CleanUninstall.RecoverOwnership(Path.Combine(root,"NotThisInstall"),originalInventory,envelope),"Recovery cannot bind another root");
+        Reject(()=>CleanUninstall.Decode(Path.Combine(root,"OtherInstallation"),envelope),"Maintenance belongs to exact install root");
+        Reject(()=>CleanUninstall.Encode(application,new[]{new Member(unknown,1,hash)}),"No arbitrary external cleanup target");
+        Reject(()=>CleanUninstall.EmptyParents(unknown,Path.Combine(root,"AnotherRoot")),"Empty-folder cleanup cannot escape boundary");
+        var data=Path.Combine(root,"PrivateData"); Directory.CreateDirectory(data); Paths.WriteNew(Path.Combine(data,"synthetic-cookie"),new byte[]{1});
+        var outsider=Path.Combine(root,"not-our-data"); Paths.WriteNew(outsider,new byte[]{2});
+        var dataLink=Path.Combine(data,"linked"); Rules.Need(CreateHardLinkW(dataLink,outsider,IntPtr.Zero),"Create data hardlink");
+        Reject(()=>Integration.DeleteDataTree(data),"Data preflight rejects hardlink");
+        Rules.Need(File.Exists(Path.Combine(data,"synthetic-cookie")) && File.Exists(outsider),"Data preflight deleted partial files"); ++passed;
+        File.Delete(dataLink); Integration.DeleteDataTree(data); Rules.Need(!Directory.Exists(data) && File.Exists(outsider),"Clean data scoped to private tree"); ++passed;
+        var assembly=System.Reflection.Assembly.Load(File.ReadAllBytes(System.Reflection.Assembly.GetExecutingAssembly().Location));
+        Rules.Need(assembly.GetType("Gbrowser.Setup.CleanUninstall",true).GetMethod("Finish",System.Reflection.BindingFlags.Static|System.Reflection.BindingFlags.NonPublic)!=null,"In-memory uninstall handoff method absent"); ++passed;
     }
     static string Fixture(string application, string payload, CheckedPackage arcarum) {
         application = Paths.Local(application); Directory.CreateDirectory(application);
@@ -247,6 +308,7 @@ internal static class SetupChecks {
                 Rules.Need(query.Proxy != null && query.Proxy.GetProxy(address) == configured.GetProxy(address) &&
                     query.Proxy.IsBypassed(address) == (host == "codeload.github.com"), "Download ignored default proxy/bypass rule: " + host);
                 Rules.Need(!query.AllowAutoRedirect && query.Credentials == null && query.Proxy.Credentials == null, "Proxy change enabled redirects or credentials");
+                Rules.Need(query.Timeout==60000 && query.ReadWriteTimeout==60000,"Download timeout must be sixty seconds");
                 query.Abort(); ++passed;
             }
             WebRequest.DefaultWebProxy = null;

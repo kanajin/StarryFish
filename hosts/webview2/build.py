@@ -217,7 +217,7 @@ def compile_setup(fingerprint, output):
               '/r:System.Windows.Forms.dll', '/r:System.Drawing.dll',
                '/win32icon:' + str(ROOT.parents[1] / 'assets/starryfish.ico'), str(ROOT / 'setup/Source.cs'), str(ROOT / 'setup/Setup.cs'), str(ROOT / 'setup/ManualReload.cs'),
                str(ROOT / 'setup/ApplicationUpdate.cs'), str(ROOT / 'setup/SetupWindow.cs'), str(ROOT / 'setup/SetupOptions.cs'),
-               str(ROOT / 'setup/EmbeddedPackage.cs'), str(ROOT / 'setup/Integration.cs'), str(generated)]
+               str(ROOT / 'setup/EmbeddedPackage.cs'), str(ROOT / 'setup/Integration.cs'), str(ROOT / 'setup/CleanUninstall.cs'), str(generated)]
     subprocess.run([*common, '/target:winexe', '/resource:' + str(embedded) + ',StarryFish.Payload.zip', '/main:Gbrowser.Setup.Program', '/out:' + str(destination / 'StarryFishSetup.exe')],
                    stdout=output, stderr=subprocess.STDOUT, check=True)
     subprocess.run([*common, str(ROOT / 'checks/SetupChecks.cs'), '/main:Gbrowser.Setup.SetupChecks',
@@ -230,7 +230,7 @@ def setup_inventory():
 
 
 def package_setup():
-    """New setup review package: fixed ZeroOmega + host, helpers fetched at install."""
+    """Setup review package: fixed ZeroOmega + host, checked online/local helpers."""
     verify()
     readers = setup_members()
     readers['StarryFishSetup.exe'] = BUILD / 'setup/StarryFishSetup.exe'
@@ -244,7 +244,7 @@ def package_setup():
             directories.add(folder)
     record = {'schema': 1, 'kind': 'STARRYFISH_WINDOWS_INSTALLER',
               'runtime': 'EXISTING_WEBVIEW2_AND_WINDOWS_NET_FRAMEWORK_REQUIRED',
-              'first_install_helpers': 'PUBLIC_HTTPS_LATEST_RELEASE_OR_ALLOWED_DEVELOPMENT_COMMIT',
+              'first_install_helpers': 'PUBLIC_HTTPS_LATEST_RELEASE_OR_ALLOWED_DEVELOPMENT_COMMIT_OR_VALIDATED_LOCAL_ZIP',
               'install_browser_acceptance': 'NOT_RUN', 'source_signature': 'NOT_EVALUATED',
               'files': {name: {'bytes': size, 'sha256': digest} for name, (size, digest) in files.items()}}
     encoded = (json.dumps(record, sort_keys=True, indent=2) + '\n').encode('ascii')

@@ -1248,7 +1248,7 @@ class Host {
   void PollProxyMenu() {
     if (!proxy_menu_loading_ || proxy_menu_polling_) return;
     if (closing_ || failed_ || !controller_ready_ || document_generation_!=proxy_menu_generation_ ||
-        GetTickCount64()-proxy_menu_started_>16000) {
+        GetTickCount64()-proxy_menu_started_>60000) {
       proxy_menu_loading_=false;KillTimer(window_,7);
       if (!closing_) Notice(L"情景模式列表未能读取，请在ZeroOmega设置中核对");return;
     }

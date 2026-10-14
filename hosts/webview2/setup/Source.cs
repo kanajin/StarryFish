@@ -113,6 +113,7 @@ internal sealed class Json {
 
 internal sealed class HttpStatus : IOException { internal readonly int Status; internal HttpStatus(int status) : base("Source HTTP " + status) { Status = status; } }
 internal static class PublicSource {
+    internal const int RequestTimeout = 60000;
     internal static string Repository(string role) {
         Rules.Need(role == "tarou" || role == "arcarum-dungeon", "Unknown helper role");
         return role == "tarou" ? "Waaatanuki/Chrome-Extension-Tarou" : "Aureth/arcarumDungeon";
@@ -129,7 +130,7 @@ internal static class PublicSource {
         // Options proxy, including its automatic configuration and bypass rules.
         // Each allowed redirect creates its own request, so rules apply to its host.
         var query = (HttpWebRequest)WebRequest.Create(address); query.Method = "GET";
-        query.AllowAutoRedirect = false; query.Timeout = 15000; query.ReadWriteTimeout = 15000;
+        query.AllowAutoRedirect = false; query.Timeout = RequestTimeout; query.ReadWriteTimeout = RequestTimeout;
         query.UserAgent = "StarryFish-FirstInstall"; query.Headers[HttpRequestHeader.AcceptEncoding] = "identity";
         query.Accept = address.Host == "api.github.com" ? "application/vnd.github+json" : "application/octet-stream";
         return query;
@@ -141,8 +142,10 @@ internal static class PublicSource {
             "System-default TLS policy required; no legacy fallback");
         var address = Url(text, new[] { "api.github.com", "github.com", "codeload.github.com" });
         var started = System.Diagnostics.Stopwatch.StartNew();
+        Func<int> remaining = () => { var value=90000-started.ElapsedMilliseconds; Rules.Need(value>0,"下载总耗时超过 90 秒，请检查网络或系统代理设置。"); return (int)Math.Min(RequestTimeout,value); };
         for (int redirect = 0; redirect <= 4; ++redirect) {
             var query = DownloadRequest(address);
+            query.Timeout=remaining(); query.ReadWriteTimeout=remaining();
             HttpWebResponse response;
             try { response = (HttpWebResponse)query.GetResponse(); }
             catch (WebException error) {
@@ -167,7 +170,9 @@ internal static class PublicSource {
                     "Encoded/oversized response rejected");
                 using (var input = response.GetResponseStream()) using (var output = new MemoryStream()) {
                     var chunk = new byte[65536]; int count;
-                    while ((count = input.Read(chunk, 0, Math.Min(chunk.Length, limit - (int)output.Length + 1))) != 0) {
+                    while (true) {
+                        if (input.CanTimeout) input.ReadTimeout=remaining();
+                        count=input.Read(chunk,0,Math.Min(chunk.Length,limit-(int)output.Length+1)); if (count==0) break;
                         Rules.Need(started.Elapsed.TotalSeconds <= 90, "下载总耗时超过 90 秒，请检查网络或系统代理设置。");
                         Rules.Need(output.Length + count <= limit, "实际下载大小超过允许值，已停止接收文件。"); output.Write(chunk, 0, count);
                     }
@@ -305,7 +310,7 @@ internal static class Archive {
             manifestEntries[0].Size > 0 && manifestEntries[0].Size <= 256 * 1024, "One bounded lowercase manifest required");
         var prefix = manifestEntries[0].Name.Substring(0, manifestEntries[0].Name.Length - 13);
         Rules.Need(entries.All(entry => entry.Directory ? prefix.StartsWith(entry.Name, StringComparison.Ordinal) || entry.Name.StartsWith(prefix, StringComparison.Ordinal) : entry.Name.StartsWith(prefix, StringComparison.Ordinal)), "Files outside extension root");
-        Rules.Need(role != "tarou" || prefix == "Chrome-Extension-Tarou/", "Tarou extension layout changed");
+        Rules.Need(role != "tarou" || (source != null && source.Kind == "LOCAL_USER_ARCHIVE") || prefix == "Chrome-Extension-Tarou/", "Tarou extension layout changed");
         if (source != null && source.Kind == "DEVELOPMENT_CODE_SNAPSHOT") Rules.Need(prefix == "arcarumDungeon-" + source.Commit + "/", "Snapshot root/commit mismatch");
         var result = new CheckedPackage();
         using (var memory = new MemoryStream(raw, false)) using (var zip = new ZipArchive(memory, ZipArchiveMode.Read)) {
