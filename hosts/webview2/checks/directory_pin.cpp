@@ -193,6 +193,15 @@ int wmain(int argc, wchar_t** argv) {
       }
       std::cout << "PASS layout 1 toolbar/header/rail/arrow and resize edges at 96/144/192 DPI; no browser\n";
     }
+    for (const bool hidden : {false, true})
+      Require(gbrowser::webview::DecodeHiddenLoading(gbrowser::webview::EncodeHiddenLoading(hidden)) == hidden,
+          "loading display preference roundtrip mismatch");
+    for (const auto* invalid : {"", "STARRYFISH-LOADING-1\nhidden", "STARRYFISH-LOADING-2\nhidden\n",
+         "STARRYFISH-LOADING-1\nvisible\nextra", "STARRYFISH-LOADING-1\nHIDDEN\n"}) {
+      bool rejected = false;
+      try { gbrowser::webview::DecodeHiddenLoading(invalid); } catch (const std::exception&) { rejected = true; }
+      Require(rejected, "invalid loading display preference accepted");
+    }
     for (const bool dark : {false, true})
       Require(gbrowser::webview::DecodeDarkAppearance(gbrowser::webview::EncodeDarkAppearance(dark)) == dark,
           "appearance roundtrip mismatch");
@@ -493,6 +502,11 @@ int wmain(int argc, wchar_t** argv) {
       std::cout << "PASS optional tab bound/cancel-before-completion/stale identity rejection; browser NOT_STARTED\n";
     }
     const auto product = gbrowser::webview::NativeLaunchPlan(L"\"C:\\Program Files\\Gbrowser\\StarryFish.exe\"");
+    for (const auto mode : {gbrowser::RunMode::Offline, gbrowser::RunMode::GbfOpenNetwork})
+      for (bool closing : {false, true}) for (bool failed : {false, true})
+        Require(gbrowser::webview::BrowserNetworkAvailable(mode, closing, failed) ==
+            (mode == gbrowser::RunMode::GbfOpenNetwork && !closing && !failed),
+            "normal startup network/offline/shutdown boundary mismatch");
     const auto offline = gbrowser::webview::NativeLaunchPlan(L"StarryFish.exe --validation-offline");
     const auto network = gbrowser::webview::NativeLaunchPlan(L"StarryFish.exe --validation-gbf-open-network");
     Require(product && product->network_mode == gbrowser::RunMode::GbfOpenNetwork &&
@@ -589,6 +603,12 @@ int wmain(int argc, wchar_t** argv) {
       bool rejected = false;
       try { state.BeginWrite(); } catch (const std::exception&) { rejected = true; }
       Require(rejected, "unknown write was resubmitted");
+      state.BeginWrite(true);
+      Require(ProxyPreference(data).state().uncertain && !ProxyPreference(data).state().choice,
+          "explicit new selection cleared an unresolved write before readback");
+      rejected = false;
+      try { ProxyPreference(data).BeginWrite(); } catch (const std::exception&) { rejected = true; }
+      Require(rejected, "manual recovery granted automatic restart replay");
       state.Matched(gbrowser::ProxyAction::Acgpower);
       const auto saved = ProxyPreference(data).state();
       Require(saved.choice == gbrowser::ProxyAction::Acgpower && !saved.uncertain, "matched choice was not retained");

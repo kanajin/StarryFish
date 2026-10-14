@@ -50,7 +50,10 @@ void ProxyPreference::Save(ProxyPreferenceState next) {
   const auto bytes = EncodeProxyPreference(next); Require(!failed_);
   try { file_.Save(bytes); state_ = next; } catch (...) { failed_ = true; throw; }
 }
-void ProxyPreference::BeginWrite() { Require(!state_.uncertain); auto next = state_; next.uncertain = true; Save(next); }
+void ProxyPreference::BeginWrite(bool explicit_selection) {
+  Require(!state_.uncertain || explicit_selection);
+  auto next = state_; next.uncertain = true; Save(next);
+}
 void ProxyPreference::Matched(ProxyAction action, const std::string& custom_name) { Save({action, false, custom_name}); }
 void ProxyPreference::NoWrite() { auto next = state_; next.uncertain = false; Save(next); }
 }

@@ -135,6 +135,14 @@
   };
   const matches=(prepared,effective)=>matchesConfig(prepared.config,effective) ||
     (prepared.alternative!==null && matchesConfig(prepared.alternative,effective));
-  const sameIntent=(a,b)=>equal(a.profiles,b.profiles) && equal(a.temporaryRules,b.temporaryRules);
+  // Original Options.updateProfile changes lastUpdate even when downloaded
+  // bytes are unchanged, and may fill sha256 on its first background fetch.
+  // Neither field participates in proxy routing. Preserve the actual PAC/rules,
+  // source URL, revision, credentials and all other fields in the comparison.
+  const intentProfiles=prepared=>Object.fromEntries(Object.entries(prepared.profiles).map(([key,profile])=>{
+    const value={...profile};delete value.lastUpdate;delete value.sha256;
+    return [key,value];
+  }));
+  const sameIntent=(a,b)=>equal(intentProfiles(a),intentProfiles(b)) && equal(a.temporaryRules,b.temporaryRules);
   window.__starryfishProfiles={decode,hex,nameValid,prepare,equal,matches,sameIntent,sameDocument};
 })

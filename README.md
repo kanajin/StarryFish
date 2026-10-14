@@ -10,14 +10,14 @@
 
 ## 下载与安装
 
-v0.1.6 新增离线插件选择与清洁卸载，等待超时延长至60秒。
+v0.1.7 新增隐藏 GBF 加载画面角色与文字，并改进代理恢复和手动重选。
 
 在 [Releases](https://github.com/kanajin/StarryFish/releases/latest) 下载 **StarryFish-版本-windows-x64-setup.exe**，直接运行单个安装器，无需解压。
 
 - Windows 10/11 x64；需要 Microsoft .NET Framework 4.8，以及 **稳定版 WebView2 Runtime 154 或更高**。安装器会检查版本，缺失时停止并提示；[微软官方下载](https://developer.microsoft.com/microsoft-edge/webview2/)。
 - 首次安装可联网获取太郎、肉鸽，或选择自己下载的两个本地 ZIP 离线接入；两种方式都核对压缩包、插件角色、权限和资源，原 ZIP 保留。ZeroOmega 固定版本随包提供。联网下载遵循 Windows 系统代理及绕过规则，连接/读取超时为60秒；浏览器内 ZeroOmega 不控制安装器下载。
 - 安装向导中选择安装路径（必须可写且为空，或已有本程序安装）；创建当前用户开始菜单快捷方式，安装后可按 Win+S 搜索 **StarryFish**。已有安装更新时保持原路径。
-- 安装时选择 **acgpower / 岛风go / 直连**。使用加速器时先启动并启用它；新资料首次启动按此选择核对实际配置，再进入 GBF。已有资料保留自己的成功选择。浏览器不提供代理服务。Mobage 登录、验证码由本人处理。
+- 安装时选择 **acgpower / 岛风go / 直连**。使用加速器时先启动并启用它；浏览器启动直接访问 GBF My Page，后台恢复本资料的连接选择，不显示准备页。手动切换代理成功后刷新当前页面；连接失败仍可访问页面或重新选择代理。浏览器不提供代理服务。Mobage 登录、验证码由本人处理。
 - 首发包未做商业代码签名；可用 Release 的 `SHA256SUMS.txt` 核对下载完整性。不要关闭系统安全功能。
 - 首版使用独立 StarryFish 资料，不自动读取或迁移旧 Gbrowser 开发版的登录态和配置。旧目录保留。
 
@@ -26,6 +26,7 @@ v0.1.6 新增离线插件选择与清洁卸载，等待超时延长至60秒。
 - 两种布局：紧凑侧栏 / 经典双排工具栏；浅色天蓝、深色群青。两布局采用网页图标标签，空间不足时重叠排列；均提供刷新按钮。界面需求见 [UI_REQUIREMENTS.md](docs/UI_REQUIREMENTS.md)。
 - 独立用户资料、代理选择与窗口布局记忆。
 - 代理菜单读取 ZeroOmega 的自定义情景模式并支持切换，实际配置匹配的当前模式显示勾选。
+- 三点菜单可隐藏 GBF 加载界面中的角色和 “Now Loading...” 文字，保留暗色加载背景。
 - 多标签，＋/Ctrl+T 新建，Ctrl+W 或中键关闭普通标签；固定 GBF 主标签保留。
 - 双游戏窗口；箭头点击一次把右侧当前网址同步到副窗，相同网址则刷新副窗。
 - 太郎与肉鸽侧栏支持开关、分隔调整及拆出窗口。
@@ -63,7 +64,7 @@ python -B build.py test
 python -B build.py verify
 python -B build.py package-setup
 cd ../..
-python -B tools/package_release.py 0.1.6
+python -B tools/package_release.py 0.1.7
 ```
 
 依赖从官方固定 URL 获取并验证 SHA256。太郎/肉鸽固定快照仅用于构建检查；终端用户首装可解析上游最新版本，或选择两个本地 ZIP。包输出在 `dist/`。推送 `main` 会构建并保留检查产物，推送 `v*` 标签会额外发布 GitHub Release；工作流不会访问或上传本地用户资料。发布新版本前需同时更新 `VERSION` 与 `RELEASE_NOTES.md`，标签版本必须与 `VERSION` 一致。

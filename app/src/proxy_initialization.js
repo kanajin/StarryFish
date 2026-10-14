@@ -1,15 +1,21 @@
 // Executed only in an explicitly confirmed, pinned original ZeroOmega options
 // document. Use its replied worker API; no storage edits, silent retries or
 // original-package changes. A lost reply may follow a partially completed reset.
-(async function runProxyAction(operation, expectedUrl, expected, action, readOnly = false, customHex = '') {
+(async function runProxyAction(operation, expectedUrl, expected, action, readOnly = false, customHex = '', rememberStartup = false) {
+  window.__gbrowserProxyActionOperation=operation;
   const custom=action==='custom';
   const helper=custom?window.__starryfishProfiles:null;
   let prepared=null;
+  // Fixed categories only. An older action cannot overwrite a new action's
+  // record; no profile name, PAC, URL or API error leaves this document.
+  const diagnostic={operation,category:0};
+  if (action!=='initialize') window.__gbrowserProxySelectionDiagnostic=diagnostic;
+  const mark=category => {diagnostic.category=category;};
   const host = (verb) => new Promise((resolve, reject) => {
     window.gbrowserProxyQuery({request: operation + ':' + verb, persistent: false,
       onSuccess: resolve, onFailure: () => reject(new Error('host denied'))});
   });
-  const sameDocument = () => location.href.split('#')[0] === expectedUrl &&
+  const sameDocument = () => window.__gbrowserProxyActionOperation===operation && location.href.split('#')[0] === expectedUrl &&
     typeof chrome !== 'undefined' && chrome.runtime &&
     'chrome-extension://' + chrome.runtime.id + '/options.html' === expectedUrl &&
     typeof chrome.runtime.sendMessage === 'function';
@@ -201,7 +207,7 @@
           canonicalIslandPac(effective.value.pacScript.data) === canonicalIslandPac(approvedPacData))) &&
           !Object.prototype.hasOwnProperty.call(effective.value.pacScript, 'url'));
   };
-  let observer = null, watch = null, observing = false, changed = false, heartbeat = 0, verifying = false;
+  let observer = null, watch = null, observing = false, changed = false, heartbeat = 0, verifying = false, confirmed = false;
   const waitForHost = async () => {
     const deadline = Date.now() + 2000;
     for (let tries = 0; tries < 20; ++tries) {
@@ -223,7 +229,8 @@
   };
   try {
     if (!['initialize', 'direct', 'acgpower', '岛风go', 'custom'].includes(action) ||
-        typeof readOnly !== 'boolean' || (readOnly && action === 'initialize')) return;
+        typeof readOnly !== 'boolean' || typeof rememberStartup !== 'boolean' ||
+        (rememberStartup && readOnly) || (readOnly && action === 'initialize')) return;
     if (custom) {if (!helper || !helper.sameDocument()) return;action=helper.decode(customHex);}
     await waitForHost();
     // A document signal starts only the read-only worker preflight. Runtime
@@ -263,21 +270,24 @@
         try { location.reload(); } catch (_) { /* The user can refresh normally. */ }
       }
     } else {
+      mark(10);
       const actual = await call('getAll', []);  // The original worker's readiness reply; no separate probe/write.
       if (custom) {
+        mark(11);
         for (let i=0;i<20 && typeof OmegaPac==='undefined' && sameDocument();++i)
           await new Promise(resolve=>setTimeout(resolve,100));
         prepared=await prepareCustom(actual);
-      } else if (!baselineMatches(actual)) { await host('different'); return; }
+      } else if (!baselineMatches(actual)) { mark(20); await host('different'); return; }
       if (!custom && action === 'acgpower' && actual['+acgpower'].pacScript) {
+        mark(12);
         const local = await readLocalPac();
-        if (actual['+acgpower'].pacScript !== local) { await host('different'); return; }
+        if (actual['+acgpower'].pacScript !== local) { mark(21); await host('different'); return; }
         approvedPacData = pacAscii(local);
       } else if (!custom && readOnly && action === 'acgpower') {
         // A saved URL configuration alone does not mean the local accelerator
         // is running. Startup stays at preparation when its fixed PAC service
         // is unavailable; no fallback to direct and no configuration write.
-        await readLocalPac();
+        mark(12); await readLocalPac();
       }
       if (!custom && action === '岛风go') {
         for (let i = 0; i < 20 && typeof OmegaPac === 'undefined' && sameDocument(); ++i)
@@ -286,17 +296,24 @@
       }
       if (!sameDocument()) throw new Error('document changed');
       if (custom && !helper.sameIntent(prepared,await prepareCustom(await call('getAll',[])))) {
-        await host('different');return;
+        mark(22); await host('different');return;
       }
       // Reauthorize after asynchronous preflight, immediately before mutation.
       if (!readOnly) {
+        mark(13);
         if (await host('apply') !== 'authorized' || !sameDocument()) throw new Error('apply denied or document changed');
+        mark(14);
         await call('applyProfile', [action, {update: false}]);
       }
       if (!sameDocument()) throw new Error('document changed');
+      mark(15);
       const state = await call('getState', [['currentProfileName', 'isSystemProfile']]);
       let matched = state && state.currentProfileName === action && state.isSystemProfile === false;
-      if (custom) matched=matched && helper.sameIntent(prepared,await prepareCustom(await call('getAll',[])));
+      if (!matched) mark(state && state.currentProfileName===action ? 24 : 23);
+      if (custom && matched) {
+        matched=helper.sameIntent(prepared,await prepareCustom(await call('getAll',[])));
+        if (!matched) mark(22);
+      }
       if (matched) {
         // Read the browser's effective regular-profile configuration, rather
         // than only the worker's in-memory selected name. Never write it here.
@@ -312,10 +329,14 @@
           }
         };
         settings.onChange.addListener(observer);
+        mark(16);
         const effective = await proxyConfiguration();
         if (!sameDocument()) throw new Error('document changed');
-        if (changed) throw new Error('configuration changed during readback');
+        if (changed) {mark(29); throw new Error('configuration changed during readback');}
         matched = matchesProxy(effective);
+        if (!matched) mark(effective.levelOfControl!=='controlled_by_this_extension' ? 25 :
+          !effective.value || (custom && effective.value.mode!==prepared.config.mode) ? 26 :
+          effective.value.mode==='pac_script' && (!effective.value.pacScript || effective.value.pacScript.mandatory!==true) ? 27 : 28);
       }
       if (readOnly) {
         // Startup has authority to observe, but a saved choice is never proof
@@ -327,7 +348,33 @@
         // This handshake enters the shared readback phase; no worker write is
         // performed by the readOnly path, including an interrupted selection.
       }
-      await host(matched ? 'matched' : 'different');
+      if (matched) mark(0);
+      const acknowledgement=await host(matched ? 'matched' : 'different');
+      if (matched && acknowledgement!=='received') throw new Error('selection not committed');
+      confirmed=matched;
+      if (matched && rememberStartup) {
+        // The selected proxy is already applied and committed by the host.
+        // Empty is ZeroOmega's original "last used" startup setting. Every
+        // selection writes that same value, so late replies cannot restore an
+        // older profile name over a newer choice. Never edit profile storage.
+        const latest=await call('getAll',[]);
+        if (!sameDocument() || changed) throw new Error('selection changed');
+        const key='-startupProfileName';
+        if (latest[key]!=='') {
+          const delta=Object.prototype.hasOwnProperty.call(latest,key)?[latest[key],'']:[''];
+          await call('patch',[{[key]:delta}]);
+        }
+        const saved=await call('getAll',[]);
+        if (!sameDocument() || changed || saved[key]!=='') throw new Error('startup choice unavailable');
+        if (custom && !helper.sameIntent(prepared,await prepareCustom(saved))) {
+          mark(22); throw new Error('selection changed');
+        }
+        const current=await call('getState',[['currentProfileName','isSystemProfile']]);
+        const effective=await proxyConfiguration();
+        if (!sameDocument() || changed || !current || current.currentProfileName!==action ||
+            current.isSystemProfile!==false || !matchesProxy(effective))
+          throw new Error('selection changed');
+      }
       if (matched && observer) {
         if (changed || !sameDocument()) {
           await host('changed');
@@ -357,7 +404,7 @@
       }
     }
   } catch (_) {
-    try { await host('unconfirmed'); } catch (_) { /* Native deadline also fails closed. */ }
+    try { await host(confirmed ? 'changed' : 'unconfirmed'); } catch (_) { /* Native deadline also fails closed. */ }
   } finally {
     if (!observing) stopObserver();
   }

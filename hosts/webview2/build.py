@@ -148,6 +148,7 @@ def test():
     subprocess.run([node, str(ROOT / 'checks/scripts.js')], check=True)
     subprocess.run([node, str(ROOT / 'checks/user_scripts.js')], check=True)
     subprocess.run([node, str(ROOT / 'checks/proxy_profiles.cjs')], check=True)
+    subprocess.run([node, str(ROOT / 'checks/loading_display.cjs')], check=True)
     subprocess.run([node, str(APP / 'tests/proxy_initialization_js_tests.cjs')], check=True)
     directory = tempfile.mkdtemp(prefix='directory-check-', dir=BUILD)
     subprocess.run([str(BUILD / 'native/Release/NativeSourceChecks.exe'), directory], check=True)
@@ -372,7 +373,8 @@ def generate_scripts():
                'kProxyProfilesScript': ROOT / 'src/proxy_profiles.js', 'kProxyMenuScript': ROOT / 'src/proxy_menu.js',
                'kTargetScript': ROOT / 'src/target_binding.js', 'kGameUiScript': ROOT / 'src/game_ui.js',
                'kArcarumBindingScript': ROOT / 'src/arcarum_binding.js', 'kPanePointerScript': ROOT / 'src/pane_pointer.js',
-               'kGameRoleScript': ROOT / 'src/game_role.js'}
+               'kGameRoleScript': ROOT / 'src/game_role.js',
+               'kLoadingDisplayScript': ROOT / 'src/loading_display.js'}
     header = '#pragma once\n'
     for name, path in scripts.items():
         text = path.read_text(encoding='utf-8')

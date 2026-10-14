@@ -17,7 +17,7 @@ class ProxyPreference {
  public:
   explicit ProxyPreference(const std::filesystem::path& data);
   const ProxyPreferenceState& state() const { return state_; }
-  void BeginWrite();
+  void BeginWrite(bool explicit_selection = false);
   void Matched(ProxyAction action, const std::string& custom_name = {});
   void NoWrite();
  private:

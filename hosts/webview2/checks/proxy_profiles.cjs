@@ -17,7 +17,7 @@ const rules={...OmegaPac.Profiles.create('规则列表','RuleListProfile'),ruleL
 const alias={...OmegaPac.Profiles.create('规则别名','VirtualProfile'),defaultProfileName:rules.name};
 options['+'+rules.name]=rules;options['+'+alias.name]=alias;
 function context(mode='ok',name=fixed.name) {
-  const events=[],intervals=new Map();let sequence=0,samples=0,applied=0;
+  const events=[],intervals=new Map();let sequence=0,samples=0,applied=0,patches=0,startup='direct';
   const c={window:{},location:{href:url},chrome:{runtime:{id:'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'}},
     OmegaPac,TextEncoder,TextDecoder,Uint8Array,URL,setTimeout,clearTimeout,Date,
     setInterval:fn=>{const id=++sequence;intervals.set(id,fn);return id;},clearInterval:id=>intervals.delete(id)};
@@ -27,14 +27,27 @@ function context(mode='ok',name=fixed.name) {
   c.window.gbrowserProxyQuery=packet=>{
     const verb=packet.request.split(':')[1];events.push(verb);
     if (mode==='deny-apply' && verb==='apply') packet.onFailure();
+    else if (mode==='deny-commit' && verb==='matched') packet.onSuccess('denied');
     else packet.onSuccess(['begin','apply'].includes(verb)?'authorized':'received');
   };
   c.chrome.runtime.sendMessage=(packet,reply)=>{
     events.push(packet.method);
     if (packet.method==='getAll') {
       ++samples;const value=clone(options);
+      value['-startupProfileName']=startup;
       if (mode==='profile-changed' && samples>1) value['+'+fixed.name].fallbackProxy.port=9999;
+      if (mode==='download-metadata' && samples>1) {
+        value['+'+name].lastUpdate='2026-10-14T00:00:00.000Z';
+        value['+'+name].sha256='synthetic-download-digest';
+      }
       reply({result:value});
+    } else if (packet.method==='patch') {
+      ++patches;assert.equal(patches,1);assert.equal(applied,1);
+      assert.equal(events.includes('matched'),true,'native successful choice must be committed before startup persistence');
+      assert.deepEqual(clone(packet.args),[{'-startupProfileName':['direct','']}]);
+      startup='';
+      if (mode==='startup-drift') effective={levelOfControl:'controlled_by_this_extension',value:{mode:'direct'}};
+      reply(mode==='startup-patch-error'?{error:{}}:{result:null});
     } else if (packet.method==='applyProfile') {
       ++applied;assert.equal(applied,1);assert.equal(events.includes('apply'),true);
       assert.deepEqual(clone(packet.args),[name,{update:false}]);
@@ -48,7 +61,7 @@ function context(mode='ok',name=fixed.name) {
     else throw new Error('unexpected mutation');
   };
   c.chrome.proxy={settings:{get:(_,reply)=>reply(effective),onChange:{addListener(){},removeListener(){}}}};
-  return {c,events,intervals,helper:c.window.__starryfishProfiles,get applied(){return applied;},
+  return {c,events,intervals,helper:c.window.__starryfishProfiles,get applied(){return applied;},get startup(){return startup;},get patches(){return patches;},
     replace:value=>{effective=value;}};
 }
 (async()=>{
@@ -84,7 +97,14 @@ function context(mode='ok',name=fixed.name) {
   assert.equal(h.matches(prepared,{levelOfControl:'controlled_by_this_extension',value:wrong}),false);
   const changed=clone(options);delete changed['+'+fixed.name];assert.throws(()=>h.prepare(changed,auto.name));
   const overridden=clone(options);overridden['+direct']={name:'direct'};assert.throws(()=>h.prepare(overridden,fixed.name));
-  for (const [mode,expected] of [['ok','matched'],['temp','matched'],['cleared-temp','matched'],['deleted-temp','matched'],['deny-apply','unconfirmed'],['apply-error','unconfirmed'],['profile-changed','different'],['temp-changed','different']]) {
+  const pacBefore=h.prepare(clone(options),pac.name);
+  const pacMetadata=clone(options);
+  pacMetadata['+'+pac.name].lastUpdate='2026-10-14T00:00:00.000Z';
+  pacMetadata['+'+pac.name].sha256='synthetic-download-digest';
+  assert.equal(h.sameIntent(pacBefore,h.prepare(pacMetadata,pac.name)),true,'original download bookkeeping is not routing drift');
+  pacMetadata['+'+pac.name].pacScript='function FindProxyForURL(url,host){return "PROXY 127.0.0.1:9999";}';
+  assert.equal(h.sameIntent(pacBefore,h.prepare(pacMetadata,pac.name)),false,'actual PAC drift must still be rejected');
+  for (const [mode,expected] of [['ok','matched'],['download-metadata','matched'],['temp','matched'],['cleared-temp','matched'],['deleted-temp','matched'],['deny-apply','unconfirmed'],['apply-error','unconfirmed'],['profile-changed','different'],['temp-changed','different']]) {
     const test=context(mode);
     await vm.runInNewContext('('+actionSource+')('+['1',JSON.stringify(url),'{}','"custom"','false',JSON.stringify(test.helper.hex(fixed.name))].join(',')+')',test.c);
     assert.equal(test.events.includes(expected),true,mode);
@@ -96,6 +116,20 @@ function context(mode='ok',name=fixed.name) {
     }
   }
   const menu=context();
+  for (const mode of ['ok','startup-patch-error','startup-drift']) {
+    const remembered=context(mode);
+    await vm.runInNewContext('('+actionSource+')('+['2',JSON.stringify(url),'{}','"custom"','false',JSON.stringify(remembered.helper.hex(fixed.name)),'true'].join(',')+')',remembered.c);
+    assert.equal(remembered.events.includes(mode==='ok'?'matched':'changed'),true,mode);
+    assert.equal(remembered.applied,1);assert.equal(remembered.patches,1);
+    assert.equal(remembered.startup,'');
+  }
+  const readOnly=context();
+  const deniedCommit=context('deny-commit');
+  await vm.runInNewContext('('+actionSource+')('+['4',JSON.stringify(url),'{}','"custom"','false',JSON.stringify(deniedCommit.helper.hex(fixed.name)),'true'].join(',')+')',deniedCommit.c);
+  assert.equal(deniedCommit.patches,0);assert.equal(deniedCommit.startup,'direct');
+  await vm.runInNewContext('('+actionSource+')('+['3',JSON.stringify(url),'{}','"custom"','true',JSON.stringify(readOnly.helper.hex(fixed.name))].join(',')+')',readOnly.c);
+  assert.equal(readOnly.events.includes('matched'),true);
+  assert.equal(readOnly.patches,0);assert.equal(readOnly.applied,0);
   vm.runInNewContext('('+menuSource+')(7,'+JSON.stringify(url)+')',menu.c);
   for(let i=0;i<40;++i) await Promise.resolve();
   const value=menu.c.window.__starryfishProxyMenuTake(7);

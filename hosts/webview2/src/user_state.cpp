@@ -153,5 +153,12 @@ bool DecodeDarkAppearance(const std::string& bytes) {
   Require(bytes == EncodeDarkAppearance(false) || bytes == EncodeDarkAppearance(true));
   return bytes == EncodeDarkAppearance(true);
 }
+std::string EncodeHiddenLoading(bool hidden) {
+  return hidden ? "STARRYFISH-LOADING-1\nhidden\n" : "STARRYFISH-LOADING-1\nvisible\n";
+}
+bool DecodeHiddenLoading(const std::string& bytes) {
+  Require(bytes == EncodeHiddenLoading(false) || bytes == EncodeHiddenLoading(true));
+  return bytes == EncodeHiddenLoading(true);
+}
 
 }

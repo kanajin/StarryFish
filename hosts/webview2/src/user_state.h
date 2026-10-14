@@ -27,6 +27,8 @@ std::string EncodeDarkAppearance(bool dark);
 bool DecodeDarkAppearance(const std::string& bytes);
 std::string EncodeBrowserLayout(bool browser_layout);
 bool DecodeBrowserLayout(const std::string& bytes);
+std::string EncodeHiddenLoading(bool hidden);
+bool DecodeHiddenLoading(const std::string& bytes);
 std::string EncodeWindowState(const WindowState& state);
 WindowState DecodeWindowState(const std::string& bytes);
 struct PaneState {

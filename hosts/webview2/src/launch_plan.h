@@ -11,6 +11,11 @@ struct LaunchPlan {
   RunMode network_mode;
   const wchar_t* data_leaf;
 };
+// Chromium uses its current network/proxy settings. Proxy readback is not a
+// prerequisite for opening My Page; explicit offline mode still has no network.
+inline bool BrowserNetworkAvailable(RunMode mode, bool closing, bool failed) {
+  return mode == RunMode::GbfOpenNetwork && !closing && !failed;
+}
 inline std::optional<LaunchPlan> NativeLaunchPlan(std::wstring_view command) {
   if (IsDefaultMainCommandLine(command)) return LaunchPlan{RunMode::GbfOpenNetwork, L"UserData"};
   const auto mode = MainRunMode(command);

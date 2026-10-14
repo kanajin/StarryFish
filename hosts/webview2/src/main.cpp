@@ -58,6 +58,7 @@ constexpr int kLightTheme = 125, kDarkTheme = 126;
 constexpr int kMinimize = 127, kMaximize = 128, kSecondaryMenu = 129;
 constexpr int kLayout1 = 130, kLayout2 = 131, kReload = 134;
 constexpr int kCacheToggle = 135, kCacheInfo = 136, kCacheClear = 137;
+constexpr int kHideLoading = 138;
 constexpr UINT kCacheResult = WM_APP + 10;
 constexpr UINT kProxyMenuReady = WM_APP + 11;
 constexpr int kProxyProfileFirst = 3000;
@@ -215,6 +216,10 @@ class Host {
     layout_choice_file_ = std::make_unique<gbrowser::webview::UserStateFile>(installation_state_ / L"layout-choice.state");
     if (layout_choice_file_->bytes()) browser_layout_ = gbrowser::webview::DecodeBrowserLayout(*layout_choice_file_->bytes());
     try {
+      loading_display_file_ = std::make_unique<gbrowser::webview::UserStateFile>(installation_state_ / L"loading-display.state");
+      if (loading_display_file_->bytes()) hide_loading_ = gbrowser::webview::DecodeHiddenLoading(*loading_display_file_->bytes());
+    } catch (...) { loading_display_file_.reset(); } // Optional cosmetic state never stops a game session.
+    try {
       cache_setting_ = std::make_unique<gbrowser::webview::UserStateFile>(installation_state_ / L"static-cache.state");
       if (cache_setting_->bytes()) cache_enabled_ = *cache_setting_->bytes() == "STARRYFISH-CACHE-ON\n";
     } catch (...) { cache_enabled_ = false; }
@@ -298,7 +303,7 @@ class Host {
         mode_ == RunMode::Offline ? L"StarryFish · 离线候选" : L"StarryFish · 游戏候选", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
         CW_USEDEFAULT, CW_USEDEFAULT, 1200, 800, nullptr, nullptr, instance, this);
     if (!window_) throw std::runtime_error("无法创建候选窗口");
-    address_ = CreateWindowExW(0, L"EDIT", L"本地准备页", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+    address_ = CreateWindowExW(0, L"EDIT", L"GBF My Page", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
         0, 0, 10, 10, window_, nullptr, instance, nullptr);
     tabs_ = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | SS_NOTIFY,
         0, 0, 10, 10, window_, nullptr, instance, nullptr);
@@ -427,7 +432,7 @@ class Host {
   }
   void StopNetworking(const wchar_t* text) noexcept {
     if (!failed_) timings_.Mark("operation-stopped");
-    failed_ = true; network_ready_ = false; ++cache_network_epoch_; ++cache_epoch_;
+    failed_ = true; proxy_verified_ = false; ++cache_network_epoch_; ++cache_epoch_;
     if (proxy_) proxy_->Invalidate(3);
     if (window_) { KillTimer(window_, 2); KillTimer(window_, 3); }
     Notice(text);
@@ -479,9 +484,12 @@ class Host {
     const auto& page = auxiliary_pages_[index - gbrowser::webview::TabSlots::kAuxFirst];
     return page && page->AllowsAsset(url);
   }
+  bool BrowsingAvailable() const {
+    return gbrowser::webview::BrowserNetworkAvailable(mode_, closing_, failed_);
+  }
   bool Document(const std::string& url) const {
     return url == "about:blank" || ExtensionAsset(url) ||
-        (mode_ == RunMode::GbfOpenNetwork && network_ready_ && !failed_ && IsBrowserNetworkUrl(url));
+        (BrowsingAvailable() && IsBrowserNetworkUrl(url));
   }
   void Configure(size_t index, bool defer_resources = false) {
     views_[index].bounds.reset(); views_[index].visible.reset();
@@ -526,7 +534,7 @@ class Host {
             if (index == 2) {
               controller_ready_ = false;
               if (proxy_) proxy_->Invalidate(3);
-              network_ready_ = false; ++cache_network_epoch_; ++cache_epoch_;
+              proxy_verified_ = false; ++cache_network_epoch_; ++cache_epoch_;
               KillTimer(window_, 2); KillTimer(window_, 3);
               ++target_generation_;
             }
@@ -536,10 +544,9 @@ class Host {
             }
             const auto url = WideToUtf8(uri);
             const bool allowed = !closing_ && (IsAuxiliary(index) ?
-                !failed_ && network_ready_ && auxiliary_pages_[index - gbrowser::webview::TabSlots::kAuxFirst] &&
+                BrowsingAvailable() && auxiliary_pages_[index - gbrowser::webview::TabSlots::kAuxFirst] &&
                 auxiliary_pages_[index - gbrowser::webview::TabSlots::kAuxFirst]->AllowsPage(url) : Document(url));
             if (index == 3) timings_.Mark(allowed ? "login-navigation-started" : "login-navigation-rejected");
-            if (allowed && index == 0 && !PreparationPage(uri)) home_pending_ = false;
             Check(args->put_Cancel(!allowed));
 
           }); return S_OK;
@@ -552,7 +559,7 @@ class Host {
             const auto uri = ComText([&](LPWSTR* text) { return args->get_Uri(text); });
             const auto url = WideToUtf8(uri);
             Check(args->put_Cancel(closing_ || (IsAuxiliary(index) ?
-                failed_ || !network_ready_ || (url != "about:blank" && !ViewExtensionAsset(index, url)) : !Document(url))));
+                !BrowsingAvailable() || (url != "about:blank" && !ViewExtensionAsset(index, url)) : !Document(url))));
           }); return S_OK;
         }).Get(), &token));
     Check(core->add_NewWindowRequested(Callback<ICoreWebView2NewWindowRequestedEventHandler>(
@@ -672,6 +679,7 @@ class Host {
             if (closing_ || !CurrentView(index, generation)) return;
             if (index == 3) { timings_.Mark("login-document-ready"); return; }
             if (gbrowser::webview::GameSurface(index)) {
+              ApplyLoadingDisplay(index);
               Check(sender->ExecuteScript(Utf8ToWide(std::string(kGameRoleScript) + (index == kLeftGame ?
                   (panes_.secondary_menu_hidden ? "(true,true);" : "(true,false);") : "(false,false);")).c_str(), nullptr));
               Check(sender->ExecuteScript(Utf8ToWide(std::string(kGameUiScript) + "();").c_str(), nullptr));
@@ -696,6 +704,7 @@ class Host {
               initialize_new_zero_ = false;
               StartProxy(ProxyAction::Initialize);
             } else if (controller_ready_) RestoreSavedProxy();
+            if (controller_ready_) BindGame();
           }); return S_OK;
         }).Get(), &token));
     Check(core->add_ProcessFailed(Callback<ICoreWebView2ProcessFailedEventHandler>(
@@ -706,7 +715,7 @@ class Host {
         Callback<ICoreWebView2WebMessageReceivedEventHandler>(
             [this, index, generation](ICoreWebView2* sender, ICoreWebView2WebMessageReceivedEventArgs* args) -> HRESULT {
               Guard([&] {
-                if (closing_ || !CurrentView(index, generation) || !network_ready_) return;
+                if (!BrowsingAvailable() || !CurrentView(index, generation)) return;
                 const auto source = WideToUtf8(ComText([&](LPWSTR* p) { return args->get_Source(p); }));
                 const auto helper = index == 1 ? bound_tarou_ : index == kArcarumView ? pages_[2] : nullptr;
                 if (!(helper ? helper->AllowsPage(source) : IsGbfPageUrl(source)) ||
@@ -715,7 +724,9 @@ class Host {
                 if (FAILED(args->TryGetWebMessageAsString(&raw))) return;
                 std::unique_ptr<wchar_t, decltype(&CoTaskMemFree)> held(raw, CoTaskMemFree);
                 const std::wstring_view message(raw ? raw : L"");
-                if (message == L"gbrowser:back" || message == L"gbrowser:forward") {
+                if (gbrowser::webview::GameSurface(index) && message == L"gbrowser:loading-display") {
+                  ApplyLoadingDisplay(index);
+                } else if (message == L"gbrowser:back" || message == L"gbrowser:forward") {
                   const auto origin = (generation << 8) | index;
                   PostMessageW(window_, kPageShortcut, static_cast<WPARAM>(message == L"gbrowser:back" ? Shortcut::Back : Shortcut::Forward),
                       static_cast<LPARAM>(origin));
@@ -735,16 +746,43 @@ class Host {
                 }
               }); return S_OK;
             }).Get(), &token));
+    if (gbrowser::webview::GameSurface(index)) InstallLoadingDisplay(index);
     if (index == 2) views_[index].Visible(FALSE);
     // A native popup must never navigate before put_NewWindow: the runtime
     // supplies its initial navigation and preserves the real window.opener.
-    if (index < 3) {
-      const auto instruction = mode_ == RunMode::Offline ?
-          L"当前为离线准备。从菜单打开GBF开始游戏候选；游戏使用独立资料。" :
-          L"请启用所选加速器，或从代理菜单选择直连。连接配置匹配后自动打开GBF。";
+    if (index < 3 && mode_ == RunMode::Offline) {
+      const auto instruction = L"当前为离线准备。从菜单打开GBF开始游戏候选；游戏使用独立资料。";
       const auto page = std::wstring(L"<!doctype html><meta charset=utf-8><style>body{font:18px 'Segoe UI';padding:40px;color:#263139;background:#f5f6f7}</style><h1>StarryFish</h1><p>") + instruction + L"</p>";
       Check(core->NavigateToString(page.c_str()));
     }
+  }
+  void ApplyLoadingDisplay(size_t index) noexcept {
+    if (closing_ || !gbrowser::webview::GameSurface(index) || !views_[index].core) return;
+    try {
+      const auto script = Utf8ToWide(std::string(kLoadingDisplayScript) + (hide_loading_ ? "(true);" : "(false);"));
+      // The script independently checks the exact top-level origin; navigation
+      // between this call and execution cannot modify another site's document.
+      if (FAILED(views_[index].core->ExecuteScript(script.c_str(), nullptr)))
+        timings_.Mark("loading-display-apply-unavailable");
+    } catch (...) { timings_.Mark("loading-display-apply-unavailable"); }
+  }
+  void InstallLoadingDisplay(size_t index) {
+    const auto generation = view_generations_[index];
+    const auto script = Utf8ToWide(std::string(kLoadingDisplayScript) + "();");
+    ++pending_;
+    const auto result = views_[index].core->AddScriptToExecuteOnDocumentCreated(script.c_str(),
+        Callback<ICoreWebView2AddScriptToExecuteOnDocumentCreatedCompletedHandler>(
+            [this, index, generation](HRESULT error, LPCWSTR) -> HRESULT {
+              --pending_;
+              if (!closing_ && CurrentView(index, generation)) {
+                if (FAILED(error)) timings_.Mark("loading-display-install-unavailable");
+                // Registration is asynchronous. Cover an already created first
+                // document as well; DOMContentLoaded supplies the same fallback.
+                ApplyLoadingDisplay(index);
+              }
+              Drain(); return S_OK;
+            }).Get());
+    if (FAILED(result)) { --pending_; timings_.Mark("loading-display-install-unavailable"); }
   }
   void ConfigureResources(size_t index) {
     auto core = views_[index].core;
@@ -764,10 +802,8 @@ class Host {
             if (!CurrentView(index, generation)) return;
             ComPtr<ICoreWebView2WebResourceRequest> request; Check(args->get_Request(&request));
             auto uri = WideToUtf8(ComText([&](LPWSTR* value) { return request->get_Uri(value); }));
-            const auto source = WideToUtf8(ComText([&](LPWSTR* value) { return views_[index].core->get_Source(value); }));
-            const bool local_pac = !IsAuxiliary(index) && pages_[0]->AllowsPage(source) && uri == "http://127.0.0.1:8123/proxy.pac";
             if (!closing_ && (ViewExtensionAsset(index, uri) || uri == "about:blank" ||
-                (mode_ == RunMode::GbfOpenNetwork && !failed_ && (local_pac || (network_ready_ && IsBrowserNetworkUrl(uri))))))
+                (BrowsingAvailable() && IsBrowserNetworkUrl(uri))))
             {
               Check(args->put_Response(nullptr));
               TryCacheRequest(index, generation, request.Get(), args);
@@ -781,7 +817,7 @@ class Host {
         }).Get(), &token));
   }
   bool CacheAllowed(size_t index, uint64_t generation) const {
-    if (!resource_cache_ || !cache_enabled_ || cache_clearing_ || closing_ || failed_ || !network_ready_ ||
+    if (!resource_cache_ || !cache_enabled_ || cache_clearing_ || closing_ || failed_ || !proxy_verified_ ||
         mode_ != RunMode::GbfOpenNetwork || !CurrentView(index, generation) || !gbrowser::webview::GameSurface(index)) return false;
     return gbrowser::webview::cache::GameDocument(WideToUtf8(ComText([&](LPWSTR* text) { return views_[index].core->get_Source(text); })));
   }
@@ -846,7 +882,7 @@ class Host {
         try {
           // The original default permit is revoked on close/proxy change/view
           // reuse. Recheck immediately before releasing every async deferral.
-          const bool valid = !closing_ && !failed_ && network_ready_ && CurrentView(held.view, held.generation) &&
+          const bool valid = !closing_ && !failed_ && proxy_verified_ && CurrentView(held.view, held.generation) &&
               held.navigation == navigation_epochs_[held.view] && held.network == cache_network_epoch_;
           if (!valid) {
             ComPtr<ICoreWebView2WebResourceResponse> denied;
@@ -882,7 +918,7 @@ class Host {
     for (auto& pair : cache_pending_) {
       auto& held = pair.second;
       if (!held.deferral || GetTickCount64() - held.started < 250) continue;
-      if (!closing_ && !failed_ && network_ready_ && CurrentView(held.view, held.generation) &&
+      if (!closing_ && !failed_ && proxy_verified_ && CurrentView(held.view, held.generation) &&
           held.navigation == navigation_epochs_[held.view] && held.network == cache_network_epoch_)
         held.args->put_Response(nullptr);
       held.deferral->Complete(); held.deferral.Reset(); held.args.Reset();
@@ -940,7 +976,8 @@ class Host {
       timings_.Mark("component-registrations-ready");
       phase_ = L"准备代理控制页";
 
-      Check(views_[0].core->Navigate(Utf8ToWide(pages_[3]->url()).c_str()));
+      if (BrowsingAvailable()) OpenHome(false);
+      else Check(views_[0].core->Navigate(Utf8ToWide(pages_[3]->url()).c_str()));
       Check(views_[2].core->Navigate(Utf8ToWide(pages_[0]->url()).c_str()));
       RecordComponents();
     }
@@ -989,7 +1026,7 @@ class Host {
   }
 
   void OpenLogin(size_t index, ICoreWebView2* sender, ICoreWebView2NewWindowRequestedEventArgs* args) {
-    if (index != 0 || closing_ || failed_ || !network_ready_ || login_window_) return;
+    if (index != 0 || !BrowsingAvailable() || login_window_) return;
     const auto source = WideToUtf8(ComText([&](LPWSTR* value) { return sender->get_Source(value); }));
     const auto target = WideToUtf8(ComText([&](LPWSTR* value) { return args->get_Uri(value); }));
     BOOL gesture = FALSE; Check(args->get_IsUserInitiated(&gesture));
@@ -1014,7 +1051,7 @@ class Host {
             views_[3].controller = controller;
             ++view_generations_[3];
             Check(controller->get_CoreWebView2(&views_[3].core));
-            if (closing_ || login_closing_ || failed_ || !network_ready_) return;
+            if (login_closing_ || !BrowsingAvailable()) return;
             // Same environment/default profile as the opener. Configure the
             // untouched view before assigning it to the browser's own request.
             Configure(3); LayoutLogin();
@@ -1092,7 +1129,7 @@ class Host {
       ShowWindow(popup, SW_HIDE); // Retain HWND/slot until real creation completion.
   }
   void OpenAuxiliary(ICoreWebView2* sender, ICoreWebView2NewWindowRequestedEventArgs* args) {
-    if (closing_ || failed_ || !network_ready_ || !bound_game_id_) return;
+    if (!BrowsingAvailable() || !bound_game_id_) return;
     const size_t role = sender == views_[1].core.Get() ? 1 : sender == views_[kArcarumView].core.Get() ? 2 : 0;
     if (!role) return;
     const auto source = WideToUtf8(ComText([&](LPWSTR* value) { return sender->get_Source(value); }));
@@ -1119,7 +1156,7 @@ class Host {
           Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
               [this, ticket = *ticket, request](HRESULT error, ICoreWebView2Controller* controller) -> HRESULT {
                 --pending_;
-                const bool wanted = tab_slots_.Complete(ticket) && !closing_ && !failed_ && network_ready_;
+                const bool wanted = tab_slots_.Complete(ticket) && BrowsingAvailable();
                 if (!wanted || FAILED(error) || !controller) {
                   if (controller) controller->Close();
                   Guard([&] { ReleaseAuxiliary(ticket); request->Complete();
@@ -1130,7 +1167,7 @@ class Host {
                   views_[ticket.index].controller = controller;
                   Check(controller->get_CoreWebView2(&views_[ticket.index].core));
                   Configure(ticket.index); LayoutAuxiliary(ticket.index);
-                  if (!tab_slots_.Current(ticket) || closing_ || failed_ || !network_ready_) return;
+                  if (!tab_slots_.Current(ticket) || !BrowsingAvailable()) return;
                   // Bind the untouched same-environment view before adding its
                   // resource handler; preserve the browser's real opener.
                   Check(request->args->put_NewWindow(views_[ticket.index].core.Get()));
@@ -1140,7 +1177,7 @@ class Host {
                   timings_.Mark("helper-popup-bound");
                 });
                 Guard([&] { request->Complete(); });
-                if (closing_ || failed_ || !network_ready_) Guard([&] { CloseAuxiliary(ticket.index, ticket.generation); });
+                if (!BrowsingAvailable()) Guard([&] { CloseAuxiliary(ticket.index, ticket.generation); });
                 Drain(); return S_OK;
               }).Get());
       if (FAILED(result)) {
@@ -1152,10 +1189,10 @@ class Host {
   }
 
   void BindGame() {
-    if (closing_ || failed_ || !controller_ready_ || !network_ready_) return;
-    // A timed-out runtime operation still owns its completion. Do not overlap
-    // another query or pretend cancellation has released the callback ledger.
-    if (target_polling_) { Notice(L"上次目标查询仍在返回中；暂不能再次提交"); return; }
+    if (closing_ || failed_ || !controller_ready_ || !BrowsingAvailable()) return;
+    // Coalesce a newer document-ready event until the existing query returns.
+    // Never overlap requests or bind a reply to the replacement document.
+    if (target_polling_) { target_rebind_pending_ = true; return; }
     const auto source = WideToUtf8(ComText([&](LPWSTR* value) { return views_[0].core->get_Source(value); }));
     if (!IsGbfPageUrl(source)) return;
     target_source_ = source;
@@ -1167,7 +1204,7 @@ class Host {
     if (!SetTimer(window_, 3, 350, nullptr)) throw std::runtime_error("无法核对游戏目标");
   }
   void PollGameTarget() {
-    if (closing_ || failed_ || !controller_ready_ || !network_ready_) return;
+    if (closing_ || failed_ || !controller_ready_ || !BrowsingAvailable()) return;
     if (GetTickCount64() - target_started_ >= 5000) {
       KillTimer(window_, 3);
       Notice(target_polling_ ? L"目标查询超时，仍等待运行库返回；不会重叠提交" : L"游戏目标尚未确定；可点太郎再次核对"); return;
@@ -1184,12 +1221,16 @@ class Host {
               Guard([&] {
                 Check(error);
                 if (closing_ || failed_ || generation != target_generation_ || document != document_generation_ ||
-                    !network_ready_ || !value || std::wstring_view(value) == L"null") return;
+                    !BrowsingAvailable() || !value || std::wstring_view(value) == L"null") return;
                 if (GetTickCount64() - target_started_ >= 5000) {
                   KillTimer(window_, 3); Notice(L"游戏目标查询已超时；可点太郎再次核对"); return;
                 }
                 const auto current = WideToUtf8(ComText([&](LPWSTR* text) { return views_[0].core->get_Source(text); }));
-                if (current != target_source_ || !IsGbfPageUrl(current)) { KillTimer(window_, 3); return; }
+                if (current != target_source_ || !IsGbfPageUrl(current)) {
+                  KillTimer(window_, 3);
+                  target_rebind_pending_ = IsGbfPageUrl(current);
+                  return;
+                }
                 const auto reply = gbrowser::webview::ParseTargetReply(WideToUtf8(value), generation);
                 KillTimer(window_, 3);
                 if (reply.reason) {
@@ -1213,7 +1254,12 @@ class Host {
                 } else timings_.Mark("tarou-existing-target-preserved", target_started_);
                 EnsurePaneView(kLeftGame); EnsurePaneView(kArcarumView);
 
-              }); Drain(); return S_OK;
+              });
+              if (target_rebind_pending_) {
+                target_rebind_pending_ = false;
+                Guard([&] { BindGame(); });
+              }
+              Drain(); return S_OK;
             }).Get());
     if (FAILED(result)) { --pending_; if (target_polling_ == generation) target_polling_ = 0; Check(result); }
   }
@@ -1297,19 +1343,19 @@ class Host {
     if (closing_ || !controller_ready_ || document_generation_!=proxy_menu_generation_ || request!=proxy_menu_request_) return;
     const auto& name=names[static_cast<size_t>(selected-kProxyProfileFirst)];
     if (mode_==RunMode::Offline && name!="direct") {Notice(L"离线候选不启动联网代理");return;}
-    StartProxy(ProxyAction::Custom,false,name);
+    StartProxy(ProxyAction::Custom,false,name,true);
   }
-  void StartProxy(ProxyAction action, bool read_only = false, std::string custom_name = {}) {
+  void StartProxy(ProxyAction action, bool read_only = false, std::string custom_name = {}, bool explicit_selection = false) {
     if (action==ProxyAction::Custom && !gbrowser::webview::ValidProxyProfileName(custom_name)) {
       Notice(L"情景模式名称无法识别；现有配置保留");return;
     }
     if (failed_) { Notice(L"当前候选已停止网络接续；请关闭后重新启动"); return; }
     if (!controller_ready_ || closing_ || loaded_ != 4) { Notice(L"代理控制页尚未就绪"); return; }
     if (proxy_ && (proxy_->pending() || (proxy_->state() == ProxyInitializationState::Unconfirmed &&
-        (read_only || !proxy_recorded_ || proxy_preference_->state().uncertain)))) {
+        !explicit_selection && (read_only || !proxy_recorded_ || proxy_preference_->state().uncertain)))) {
       Notice(L"上一操作结果尚未确定；不会重复写入代理"); return;
     }
-    if (!read_only && action != ProxyAction::Initialize && proxy_preference_->state().uncertain) {
+    if (!read_only && action != ProxyAction::Initialize && proxy_preference_->state().uncertain && !explicit_selection) {
       Notice(L"上次代理提交结果未知；请保留现场，在原版设置中核对，不自动重放"); return;
     }
     if (action == ProxyAction::Initialize) {
@@ -1320,9 +1366,11 @@ class Host {
       }
     }
     restore_probe_ = read_only; proxy_recorded_ = false;
+    proxy_explicit_selection_ = explicit_selection;
+    proxy_uncertain_before_ = proxy_preference_->state().uncertain;
     proxy_custom_name_ = std::move(custom_name);
     phase_ = read_only ? L"只读核对上次代理" : L"核对并应用本次代理选择";
-    network_ready_ = false; ++cache_network_epoch_; ++cache_epoch_;
+    proxy_verified_ = false; ++cache_network_epoch_; ++cache_epoch_;
     proxy_started_ = GetTickCount64(); proxy_timed_ = false;
     timings_.Mark(action == ProxyAction::Acgpower ? "proxy-acgpower-started" :
         action == ProxyAction::Initialize ? "proxy-initialization-started" : "proxy-other-selection-started");
@@ -1333,7 +1381,8 @@ class Host {
     std::string script = std::string(kProxyProfilesScript) + "(" + expected + ");" + kProxyBridge + "(" + std::to_string(operation_) + ',' + expected + ");" +
         kProxyScript + "(" + std::to_string(operation_) + ',' + expected + ',' + std::string(InitialProxyOptions()) +
         ",\"" + std::string(ProxyActionName(action)) + "\"," + (read_only ? "true" : "false") +
-        ",\"" + gbrowser::webview::ProxyProfileHex(proxy_custom_name_) + "\");";
+        ",\"" + gbrowser::webview::ProxyProfileHex(proxy_custom_name_) + "\"," +
+        ((!read_only && action != ProxyAction::Initialize) ? "true" : "false") + ");";
 
     Check(views_[2].core->ExecuteScript(Utf8ToWide(script).c_str(), nullptr));
     if (!SetTimer(window_, 2, 200, nullptr)) throw std::runtime_error("无法观察代理操作");
@@ -1343,9 +1392,9 @@ class Host {
     if (closing_ || failed_ || !proxy_ || polling_ || !controller_ready_) return;
     if (proxy_->Expire(GetTickCount64())) {
       timings_.Mark("proxy-operation-or-observation-expired", proxy_started_);
-      if (!restore_probe_ && proxy_->state() == ProxyInitializationState::PreflightUnavailable)
+      if (!restore_probe_ && !proxy_uncertain_before_ && proxy_->state() == ProxyInitializationState::PreflightUnavailable)
         proxy_preference_->NoWrite();
-      network_ready_ = false; ++cache_network_epoch_; ++cache_epoch_; Notice(L"代理观察或操作已超时；不会自动重新应用"); KillTimer(window_, 2); return;
+      proxy_verified_ = false; ++cache_network_epoch_; ++cache_epoch_; KillTimer(window_, 2); return;
     }
     if (!proxy_->pending() && !proxy_->observing()) { KillTimer(window_, 2); return; }
     const auto operation = operation_;
@@ -1356,10 +1405,10 @@ class Host {
             [this, operation, generation](HRESULT error, LPCWSTR value) -> HRESULT {
               --pending_; polling_ = false;
               Guard([&] {
-                Check(error);
                 if (closing_ || failed_ || !proxy_ || operation != operation_ || generation != document_generation_) return;
+                Check(error);
                 const auto source = WideToUtf8(ComText([&](LPWSTR* text) { return views_[2].core->get_Source(text); }));
-                if (!pages_[0]->AllowsPage(source)) { proxy_->Invalidate(3); network_ready_ = false; ++cache_network_epoch_; ++cache_epoch_; return; }
+                if (!pages_[0]->AllowsPage(source)) { proxy_->Invalidate(3); proxy_verified_ = false; ++cache_network_epoch_; ++cache_epoch_; return; }
                 const std::wstring encoded = value ? value : L"null";
                 if (encoded == L"null") return;
                 // The private queue emits only decimal IDs and a bounded ASCII
@@ -1377,32 +1426,33 @@ class Host {
                 if (reply == ProxyInitializationReply::Authorize &&
                     proxy_->state() == ProxyInitializationState::Running && !restore_probe_ &&
                     proxy_->action() != ProxyAction::Initialize)
-                  proxy_preference_->BeginWrite(); // Flush before returning write authority to JS.
+                  proxy_preference_->BeginWrite(proxy_explicit_selection_); // A new manual intent stays uncertain until readback matches.
                 const char* answer = reply == ProxyInitializationReply::Reject ? "denied" :
                     reply == ProxyInitializationReply::Authorize ? "authorized" : "received";
+                const auto feedback = gbrowser::webview::ProxyFeedback(*proxy_, restore_probe_, restore_fallback_.has_value());
+                // Persist the verified choice before acknowledging it to JS.
+                // Only that acknowledgement permits updating ZeroOmega startup.
+                if (feedback == gbrowser::webview::ProxyUiResult::Matched && !proxy_recorded_ &&
+                    proxy_->action() != ProxyAction::Initialize) {
+                  proxy_preference_->Matched(proxy_->action(),proxy_custom_name_); proxy_recorded_ = true;
+                }
                 const auto response = "window.__gbrowserProxyReply(" + body.substr(0, split) + ",\"" + answer + "\")";
                 Check(views_[2].core->ExecuteScript(Utf8ToWide(response).c_str(), nullptr));
-                network_ready_ = proxy_->observing();
-                const auto feedback = gbrowser::webview::ProxyFeedback(*proxy_, restore_probe_, restore_fallback_.has_value());
+                proxy_verified_ = proxy_->observing();
                 if (feedback == gbrowser::webview::ProxyUiResult::Matched) {
-                  if (!proxy_recorded_ && proxy_->action() != ProxyAction::Initialize) {
-                    proxy_preference_->Matched(proxy_->action(),proxy_custom_name_); proxy_recorded_ = true;
-                  }
+                  const bool reload_pages = !restore_probe_ && proxy_->action() != ProxyAction::Initialize && !proxy_timed_;
                   if (!proxy_timed_) {
                     timings_.Mark("proxy-settings-readback-matched", proxy_started_); proxy_timed_ = true;
                     phase_ = L"游戏运行";
 
                   }
-                  if (network_ready_ && !SetTimer(window_, 2, 2000, nullptr)) throw std::runtime_error("无法保持代理观察");
-                  // Only replace this session's untouched preparation page.
-                  // Repeated observations or later selections cannot restart
-                  // a game/login already in progress; offline remains offline.
-                  if (mode_ == RunMode::GbfOpenNetwork && network_ready_ && home_pending_ &&
-                      PreparationPage(ComText([&](LPWSTR* text) { return views_[0].core->get_Source(text); })))
-                    OpenHome(false);
+                  if (proxy_verified_ && !SetTimer(window_, 2, 2000, nullptr)) throw std::runtime_error("无法保持代理观察");
+                  // Actual selections refresh once, including startup restoration.
+                  // Read-only probes and observation heartbeats never reload.
+                  if (reload_pages) ReloadPagesAfterProxySelection();
                 } else if (feedback != gbrowser::webview::ProxyUiResult::Waiting) {
                   const auto state = proxy_->state();
-                  if (!restore_probe_ && (state == ProxyInitializationState::PreflightDifferent ||
+                  if (!restore_probe_ && !proxy_uncertain_before_ && (state == ProxyInitializationState::PreflightDifferent ||
                       state == ProxyInitializationState::PreflightUnavailable)) proxy_preference_->NoWrite();
                   if (feedback == gbrowser::webview::ProxyUiResult::RestoreSaved) {
                     const auto action = *restore_fallback_; restore_fallback_.reset();
@@ -1416,21 +1466,42 @@ class Host {
                     if (!proxy_timed_) {
                       timings_.Mark("proxy-operation-unmatched", proxy_started_);
                       timings_.Value("proxy-terminal-state", static_cast<int>(state));
-                      if (proxy_->action() == ProxyAction::Initialize) RecordInitializationDiagnostic(operation, generation);
+                      RecordProxyDiagnostic(operation, generation);
                       proxy_timed_ = true;
                     }
-                    Notice(L"代理结果未匹配或未知；游戏网络接续已停止");
                   }
                 }
               }); Drain(); return S_OK;
             }).Get());
     if (FAILED(result)) { --pending_; polling_ = false; Check(result); }
   }
-  void RecordInitializationDiagnostic(uint64_t operation, uint64_t generation) {
+  void ReloadPagesAfterProxySelection() {
+    // Only the first successful readback after applying a selection reaches here.
+    // Refresh the visible pages in place; never reload the proxy controller,
+    // helper panels or an active authentication flow. Reload failure is a page
+    // failure, not a reason to discard a successfully verified proxy choice.
+    if (closing_ || failed_ || !proxy_verified_ || login_window_) return;
+    for (const size_t index : {active_, kLeftGame}) {
+      if (index == kLeftGame && !panes_.dual) continue;
+      if (!gbrowser::webview::GameSurface(index) || settings_tabs_[index] || !views_[index].core) continue;
+      LPWSTR source = nullptr;
+      const auto result = views_[index].core->get_Source(&source);
+      const auto url = source ? WideToUtf8(source) : std::string{};
+      CoTaskMemFree(source);
+      if (FAILED(result) || !IsBrowserNetworkUrl(url) || IsGbfLoginUrl(url)) continue;
+      const auto reloaded = views_[index].core->Reload();
+      timings_.Mark(SUCCEEDED(reloaded) ? "proxy-selected-page-reload" : "proxy-selected-page-reload-failed");
+    }
+  }
+  void RecordProxyDiagnostic(uint64_t operation, uint64_t generation) {
+    const bool initialize = proxy_ && proxy_->action() == ProxyAction::Initialize;
+    const auto script = initialize ? std::wstring(L"window.__gbrowserProxyInitDiagnostic || 0") :
+        L"window.__gbrowserProxySelectionDiagnostic && window.__gbrowserProxySelectionDiagnostic.operation === " +
+        std::to_wstring(operation) + L" ? window.__gbrowserProxySelectionDiagnostic.category : 0";
     ++pending_;
-    const auto result = views_[2].core->ExecuteScript(L"window.__gbrowserProxyInitDiagnostic || 0",
+    const auto result = views_[2].core->ExecuteScript(script.c_str(),
         Callback<ICoreWebView2ExecuteScriptCompletedHandler>(
-            [this, operation, generation](HRESULT error, LPCWSTR value) -> HRESULT {
+            [this, operation, generation, initialize](HRESULT error, LPCWSTR value) -> HRESULT {
               --pending_;
               if (SUCCEEDED(error) && !closing_ && operation == operation_ && generation == document_generation_ && value) {
                 const std::wstring_view code(value);
@@ -1440,7 +1511,9 @@ class Host {
                 if (code.size() == 1 && code[0] >= L'0' && code[0] <= L'6') category = code[0] - L'0';
                 if (code == L"10") category = 10;
                 if (code == L"11") category = 11;
-                if (category >= 0) timings_.Value("proxy-initialization-diagnostic", category);
+                if (!initialize && code.size() == 2 && (code[0] == L'1' || code[0] == L'2') && code[1] >= L'0' && code[1] <= L'9')
+                  category = (code[0] - L'0') * 10 + code[1] - L'0';
+                if (category >= 0) timings_.Value(initialize ? "proxy-initialization-diagnostic" : "proxy-selection-diagnostic", category);
               }
               Drain(); return S_OK;
             }).Get());
@@ -1474,7 +1547,7 @@ class Host {
   void CopyPrimaryToSecondary() {
     // One user action, one native dispatch. No source observers, timer, queue
     // or persisted switch can cause a later navigation or refresh.
-    if (!panes_.dual || !network_ready_ || !bound_game_id_ || closing_ || failed_) return;
+    if (!panes_.dual || !BrowsingAvailable() || !bound_game_id_) return;
     if (!views_[active_].core || !views_[kLeftGame].core) { Notice(L"请等待两个游戏窗口就绪，再点击箭头"); return; }
     const auto source = GameSource(active_);
     if (!Document(WideToUtf8(source))) return;
@@ -1505,7 +1578,7 @@ class Host {
   }
   void EnsurePaneView(size_t index) {
     const bool desired = index == kLeftGame ? panes_.dual : panes_.arcarum;
-    if (closing_ || failed_ || !network_ready_ || !bound_game_id_ || !desired) return;
+    if (!BrowsingAvailable() || !bound_game_id_ || !desired) return;
     const auto source = index == kLeftGame && !left_requested_source_.empty() ? left_requested_source_ :
         ComText([&](LPWSTR* text) { return views_[0].core->get_Source(text); });
     if (!IsGbfPageUrl(WideToUtf8(source))) return;
@@ -1526,7 +1599,7 @@ class Host {
             [this, index, generation, source](HRESULT error, ICoreWebView2Controller* controller) -> HRESULT {
               --pending_; pane_pending_[index - kLeftGame] = false;
               const bool desired_now = index == kLeftGame ? panes_.dual : panes_.arcarum;
-              if (closing_ || failed_ || !network_ready_ || !desired_now || view_generations_[index] != generation) {
+              if (!BrowsingAvailable() || !desired_now || view_generations_[index] != generation) {
                 if (controller) controller->Close();
                 Guard([&] { EnsurePaneView(index); }); Drain(); return S_OK;
               }
@@ -1545,7 +1618,7 @@ class Host {
     if (FAILED(result)) { --pending_; pane_pending_[index - kLeftGame] = false; Check(result); }
   }
   void PinArcarumTarget() {
-    if (closing_ || failed_ || !network_ready_ || !bound_game_id_ || !panes_.arcarum || !views_[kArcarumView].core) return;
+    if (!BrowsingAvailable() || !bound_game_id_ || !panes_.arcarum || !views_[kArcarumView].core) return;
     const auto source = WideToUtf8(ComText([&](LPWSTR* text) { return views_[kArcarumView].core->get_Source(text); }));
     if (!pages_[2]->AllowsPage(source)) return;
     // Explicit original API with the already verified right game. Initial
@@ -1863,7 +1936,7 @@ class Host {
     // Consume classified requests without falling through to login. A name
     // alone grants no capability, nor do helper/login/hidden controllers.
     const bool game_origin = index == kLeftGame && panes_.dual;
-    if (closing_ || failed_ || !network_ready_ || !bound_game_id_ || (index != active_ && !game_origin) ||
+    if (!BrowsingAvailable() || !bound_game_id_ || (index != active_ && !game_origin) ||
         (index != 0 && !game_origin && (index < gbrowser::webview::TabSlots::kFirst || IsAuxiliary(index)))) return true;
     BOOL gesture = FALSE; Check(args->get_IsUserInitiated(&gesture));
     ComPtr<ICoreWebView2NewWindowRequestedEventArgs3> detail;
@@ -1886,7 +1959,7 @@ class Host {
     NewTab(false, std::move(bookmark)); return true;
   }
   bool BookmarkCurrent(const BookmarkRequest& request) const {
-    return !closing_ && !failed_ && network_ready_ && bound_game_id_ &&
+    return BrowsingAvailable() && bound_game_id_ &&
         CurrentView(request.origin.index, request.origin.generation) &&
         navigation_epochs_[request.origin.index] == request.navigation_epoch &&
         WideToUtf8(ComText([&](LPWSTR* text) { return views_[request.origin.index].core->get_Source(text); })) == request.source;
@@ -1984,7 +2057,7 @@ class Host {
     if (text != L"about:blank" && text.find(L"://") == std::wstring::npos) text = L"https://" + text;
     const auto url = WideToUtf8(text);
     if ((url != "about:blank" && !IsBrowserNetworkUrl(url)) || !Document(url)) {
-      Notice(L"此地址当前不可打开；请先从代理菜单选择并核对连接方式，网页使用HTTP或HTTPS"); return;
+      Notice(L"此地址当前不可打开；网页地址需要使用HTTP或HTTPS"); return;
     }
     drafts_[active_] = false;
     Check(views_[active_].core->Navigate(text.c_str())); FocusActive();
@@ -2293,6 +2366,7 @@ class Host {
         AppendMenuW(menu, MF_STRING, kMoba, panes_.moba_visible ? L"关闭左侧moba栏" : L"开启左侧moba栏");
         AppendMenuW(menu, MF_STRING, kSecondaryMenu, panes_.secondary_menu_hidden ?
             L"显示副窗口右侧菜单" : L"隐藏副窗口右侧菜单并收窄");
+        AppendMenuW(menu, MF_STRING | (hide_loading_ ? MF_CHECKED : 0), kHideLoading, L"隐藏GBF加载小人和文字");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
       }
       AppendMenuW(menu, MF_STRING | (!theme_.dark() ? MF_CHECKED : 0), kLightTheme, L"浅色天蓝");
@@ -2313,6 +2387,14 @@ class Host {
       DestroyMenu(menu); if (selected) Action(selected); return;
     }
     if (failed_ || loaded_ != 4) { Notice(L"当前操作尚不可用，请等待准备完成；若已停止运行，请正常关闭后重开"); return; }
+    if (id == kHideLoading) {
+      if (!loading_display_file_) { Notice(L"加载画面设置文件不可用，请保留原文件；当前显示保持不变"); return; }
+      try { loading_display_file_->Save(gbrowser::webview::EncodeHiddenLoading(!hide_loading_)); }
+      catch (...) { Notice(L"加载画面设置未保存，请稍后重试；当前显示保持不变"); return; }
+      hide_loading_ = !hide_loading_;
+      for (size_t index = 0; index < views_.size(); ++index) ApplyLoadingDisplay(index);
+      return;
+    }
     if (id == kCopy) { CopyCurrentLink(); return; }
     if (id == kReload) {
       auto& core = views_[active_].core;
@@ -2363,7 +2445,7 @@ class Host {
         if (answer == IDYES) { restart_gbf_ = true; Close(); }
         return;
       }
-      if (!network_ready_) { Notice(L"需完成候选代理接续后才能进入游戏"); return; }
+      if (!BrowsingAvailable()) return;
       OpenHome(); return;
     }
     // EDIT focus/change notifications and unknown commands are not panel
@@ -2373,16 +2455,10 @@ class Host {
     else SetArcarum(!panes_.arcarum);
   }
   void OpenHome(bool focus = true) {
-    // Clear before dispatch: a rejected/unknown navigation is not replayed by
-    // the observation timer. The explicit home menu remains available.
-    home_pending_ = false;
     timings_.Mark("game-home-navigation-started");
 
     SelectTab(0, focus);
     Check(views_[0].core->Navigate(Utf8ToWide(GbfHomeUrl()).c_str()));
-  }
-  bool PreparationPage(std::wstring_view uri) const {
-    return uri == L"about:blank" || uri == Utf8ToWide(pages_[3]->url());
   }
   void CopyCurrentLink() {
     // Actual active page, never an unsubmitted draft, auth popup or hidden
@@ -2423,7 +2499,7 @@ class Host {
     if (!closing_) SaveLayout(true);
     if (!closing_) SaveTarouPlacement();
     if (!closing_) SavePanes();
-    closing_ = true; network_ready_ = false; ++cache_network_epoch_; ++cache_epoch_;
+    closing_ = true; proxy_verified_ = false; ++cache_network_epoch_; ++cache_epoch_;
     // Cancel unfinished static downloads so their GetContent callbacks can
     // settle before Drain releases the WebView environment.
     cache_stopping_ = true;
@@ -3038,6 +3114,7 @@ class Host {
   uint64_t proxy_menu_request_=0,proxy_menu_generation_=0,proxy_menu_started_=0;
   bool proxy_menu_loading_=false,proxy_menu_polling_=false;
   bool restore_started_ = false, restore_probe_ = false, proxy_recorded_ = false;
+  bool proxy_explicit_selection_ = false, proxy_uncertain_before_ = false;
   std::unique_ptr<ProxyInitialization> proxy_;
   uint64_t operation_ = 0, document_generation_ = 0;
   uint64_t proxy_started_ = 0;
@@ -3045,7 +3122,7 @@ class Host {
   std::string target_source_;
   int bound_game_id_ = 0;
   int pending_ = 0, loaded_ = 0;
-  bool closing_ = false, network_ready_ = false, failed_ = false;
+  bool closing_ = false, proxy_verified_ = false, failed_ = false;
   gbrowser::webview::PaneState panes_;
   std::unique_ptr<gbrowser::webview::UserStateFile> pane_file_;
   std::unique_ptr<gbrowser::webview::UserStateFile> tarou_window_file_;
@@ -3063,12 +3140,14 @@ class Host {
   gbrowser::webview::UiTheme theme_;
   std::unique_ptr<gbrowser::webview::UserStateFile> appearance_file_;
   std::unique_ptr<gbrowser::webview::UserStateFile> layout_choice_file_;
+  std::unique_ptr<gbrowser::webview::UserStateFile> loading_display_file_;
+  bool hide_loading_ = false;
   bool browser_layout_ = false;
   bool controller_ready_ = false, polling_ = false, initialize_new_zero_ = false;
   bool proxy_timed_ = false;
-  bool home_pending_ = true;
   bool restart_gbf_ = false, return_profile_ = false;
   ULONGLONG target_polling_ = 0;
+  bool target_rebind_pending_ = false;
   bool browser_started_ = false, browser_exited_ = false, login_pending_ = false, login_closing_ = false;
 };
 
