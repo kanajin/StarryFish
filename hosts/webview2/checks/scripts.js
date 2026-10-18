@@ -165,6 +165,7 @@ check('side button adapter consumes one trusted release and no game click', () =
   let cancelled = 0;
   const event = (button, isTrusted = true) => ({button, isTrusted, preventDefault: () => ++cancelled});
   for (const button of [0, 1, 2]) {c.events.get('mousedown')(event(button)); c.events.get('mouseup')(event(button));}
+  assert.deepEqual(c.messages, ['gbrowser:active-game']); c.messages.length = 0;
   c.events.get('mouseup')(event(3, false)); assert.equal(c.messages.length, 0);
   c.events.get('mousedown')(event(3)); assert.equal(c.messages.length, 0);
   c.events.get('mouseup')(event(3)); c.events.get('mouseup')(event(4));
@@ -176,8 +177,17 @@ check('fixed helper side buttons share routing without a second native input pat
   c.state.location.href = expected; c.state.location.origin = `chrome-extension://${id}`;
   vm.runInContext(source('pane_pointer.js') + `(${JSON.stringify(expected)});`, c.state);
   const event = {button: 3, isTrusted: true, preventDefault: () => {}};
+  c.events.get('mousedown')({...event, button: 0}); assert.deepEqual(c.messages, []);
   c.events.get('mouseup')(event); assert.deepEqual(c.messages, ['gbrowser:back']);
   c.state.location.href = 'about:blank'; c.events.get('mouseup')(event); assert.equal(c.messages.length, 1);
+});
+check('CD view selection needs a trusted game click, not script or other origin', () => {
+  const c = gameUi(); c.run(); c.messages.length = 0;
+  const click = {button: 0, isTrusted: false, preventDefault: () => assert.fail('game click consumed')};
+  c.events.get('mousedown')(click); assert.deepEqual(c.messages, []);
+  c.events.get('mousedown')({...click, isTrusted: true}); assert.deepEqual(c.messages, ['gbrowser:active-game']);
+  c.state.location.origin = 'https://example.test';
+  c.events.get('mousedown')({...click, isTrusted: true}); assert.equal(c.messages.length, 1);
 });
 check('game display adapter refuses child and unrelated page contexts', () => {
   const child = gameUi(); child.state.window.top = {}; child.run(); assert.equal(child.events.size, 0);

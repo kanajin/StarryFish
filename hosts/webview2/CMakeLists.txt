@@ -11,6 +11,8 @@ add_executable(GbrowserWebView2 WIN32 src/starryfish.rc src/profile_dialog.cpp s
 add_executable(NativeSourceChecks checks/directory_pin.cpp src/directory_pin.cpp src/component_catalogue.cpp src/user_state.cpp src/profile_catalogue.cpp src/proxy_preference.cpp)
 add_executable(UiThemePreview checks/ui_theme_preview.cpp)
 target_sources(GbrowserWebView2 PRIVATE src/resource_cache.cpp)
+target_sources(GbrowserWebView2 PRIVATE src/network_capture.cpp src/capture_mcp.cpp)
+target_sources(NativeSourceChecks PRIVATE src/network_capture.cpp src/capture_mcp.cpp checks/network_capture.cpp)
 target_sources(NativeSourceChecks PRIVATE src/resource_cache.cpp checks/resource_cache.cpp)
 foreach(target GbrowserWebView2 NativeSourceChecks UiThemePreview)
   target_compile_features(${target} PRIVATE cxx_std_17)
@@ -21,7 +23,7 @@ foreach(target GbrowserWebView2 NativeSourceChecks UiThemePreview)
   target_include_directories(${target} PRIVATE src ../../app/src .sdk/1.0.4258.31 .build/generated)
   target_link_libraries(${target} PRIVATE
     gbrowser_core
-    bcrypt shell32 ole32 oleaut32 user32 comctl32 version advapi32 shlwapi crypt32 winhttp)
+    bcrypt shell32 ole32 oleaut32 user32 comctl32 version advapi32 shlwapi crypt32 winhttp windowsapp)
 endforeach()
 target_link_libraries(UiThemePreview PRIVATE gdiplus dwmapi)
 target_link_libraries(GbrowserWebView2 PRIVATE

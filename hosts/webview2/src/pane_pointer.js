@@ -8,7 +8,11 @@
   if (!matches() || window.__gbrowserPanePointer) return;
   window.__gbrowserPanePointer = true;
   const side = event => matches() && event.isTrusted && (event.button === 3 || event.button === 4);
-  document.addEventListener('mousedown', event => { if (side(event)) event.preventDefault(); }, true);
+  document.addEventListener('mousedown', event => {
+    if (expected === null && matches() && event.isTrusted && event.button === 0)
+      window.chrome?.webview?.postMessage('gbrowser:active-game');
+    if (side(event)) event.preventDefault();
+  }, true);
   document.addEventListener('auxclick', event => { if (side(event)) event.preventDefault(); }, true);
   document.addEventListener('mouseup', event => {
     if (!side(event)) return;

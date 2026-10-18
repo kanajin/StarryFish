@@ -143,6 +143,8 @@ def package_candidate():
 
 def test():
     verify()
+    subprocess.run([sys.executable, '-B', str(ROOT / 'checks/capture_mcp.py'),
+                    str(BUILD / 'native/Release/StarryFish.exe')], check=True)
     node = shutil.which('node')
     package.require(node is not None, 'use the existing Node runtime; do not install a new toolchain')
     subprocess.run([node, str(ROOT / 'checks/scripts.js')], check=True)

@@ -18,6 +18,7 @@
 #include "login_resume.h"
 #include "compact_chrome.h"
 #include "host_ui_flow.h"
+#include "network_capture.h"
 #include <windows.h>
 #include <fstream>
 #include <iostream>
@@ -563,6 +564,7 @@ int wmain(int argc, wchar_t** argv) {
     gbrowser::RequireSafePath(root);
     Require(root.is_absolute() && std::filesystem::is_directory(root) && std::filesystem::is_empty(root),
             "must use a new empty temporary directory");
+    gbrowser::webview::capture::RunCaptureChecks();
     RunResourceCacheChecks(root);
     {
       const auto path = root / L"layout.state";

@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <roapi.h>
 #include <shellapi.h>
 #include <shlobj.h>
 #include <commctrl.h>
@@ -35,6 +36,8 @@
 #include "target_reply.h"
 #include "zero_initialization.h"
 #include "resource_cache.h"
+#include "network_capture.h"
+#include "skill_overlay.h"
 #include <shlwapi.h>
 #include <array>
 #include <algorithm>
@@ -61,6 +64,8 @@ constexpr int kMinimize = 127, kMaximize = 128, kSecondaryMenu = 129;
 constexpr int kLayout1 = 130, kLayout2 = 131, kReload = 134;
 constexpr int kCacheToggle = 135, kCacheInfo = 136, kCacheClear = 137;
 constexpr int kHideLoading = 138;
+constexpr int kCaptureStop = 139, kCaptureInfo = 140, kCaptureClear = 141;
+constexpr int kSkillCooldown = 142;
 constexpr UINT kCacheResult = WM_APP + 10;
 constexpr UINT kProxyMenuReady = WM_APP + 11;
 constexpr int kProxyProfileFirst = 3000;
@@ -375,6 +380,9 @@ class Host {
     }
     SetWindowPos(window_, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
     theme_.Window(window_); RefreshProfileTitle(); UpdateFont();
+    try { capture_server_ = std::make_unique<gbrowser::webview::capture::Server>(capture_); }
+    catch (...) { Notice(L"本机网络抓取接口未能启动；可继续浏览"); }
+    if (!SetTimer(window_, 9, 100, nullptr)) throw std::runtime_error("无法观察网络抓取状态");
     Layout(); RestoreLayout(show);
     try {
       if (!SetTimer(window_, 6, 100, nullptr)) throw std::runtime_error("cache timer unavailable");
@@ -550,6 +558,11 @@ class Host {
                 auxiliary_pages_[index - gbrowser::webview::TabSlots::kAuxFirst]->AllowsPage(url) : Document(url));
             if (index == 3) timings_.Mark(allowed ? "login-navigation-started" : "login-navigation-rejected");
             Check(args->put_Cancel(!allowed));
+            if (gbrowser::webview::GameSurface(index) && allowed) {
+              capture_game_[index] = IsGbfPageUrl(url);
+              skill_routes_[index] = gbrowser::webview::cooldown::BattleRoute(url);
+              if (capture_observers_[index]) { capture_observers_[index]->ResetCooldown(); capture_observers_[index]->Tick(); }
+            }
 
           }); return S_OK;
         }).Get(), &token));
@@ -629,6 +642,16 @@ class Host {
           Guard([&] {
             if (!CurrentView(index, generation) || closing_) return;
             BOOL document = FALSE; Check(args->get_IsNewDocument(&document));
+            if (gbrowser::webview::GameSurface(index)) {
+              const auto source = WideToUtf8(GameSource(index));
+              const auto route = gbrowser::webview::cooldown::BattleRoute(source);
+              if (route != skill_routes_[index]) {
+                skill_routes_[index] = route;
+                if (capture_observers_[index]) capture_observers_[index]->ResetCooldown();
+              }
+              capture_game_[index] = IsGbfPageUrl(source) && !IsGbfLoginUrl(source);
+              if (capture_observers_[index]) capture_observers_[index]->Tick();
+            }
             if (document && gbrowser::webview::GameSurface(index)) {
               // Keep the viewport stable while a game document reloads. Clearing
               // the known inset shrinks the WebView before its adapter reports
@@ -726,7 +749,9 @@ class Host {
                 if (FAILED(args->TryGetWebMessageAsString(&raw))) return;
                 std::unique_ptr<wchar_t, decltype(&CoTaskMemFree)> held(raw, CoTaskMemFree);
                 const std::wstring_view message(raw ? raw : L"");
-                if (gbrowser::webview::GameSurface(index) && message == L"gbrowser:loading-display") {
+                if (gbrowser::webview::GameSurface(index) && message == L"gbrowser:active-game") {
+                  if (index == active_ || (index == kLeftGame && panes_.dual)) { skill_view_ = index; RefreshCooldown(); }
+                } else if (gbrowser::webview::GameSurface(index) && message == L"gbrowser:loading-display") {
                   ApplyLoadingDisplay(index);
                 } else if (message == L"gbrowser:back" || message == L"gbrowser:forward") {
                   const auto origin = (generation << 8) | index;
@@ -787,6 +812,16 @@ class Host {
     if (FAILED(result)) { --pending_; timings_.Mark("loading-display-install-unavailable"); }
   }
   void ConfigureResources(size_t index) {
+    if (gbrowser::webview::GameSurface(index)) {
+      capture_observers_[index].reset();
+      const auto generation = view_generations_[index];
+      capture_observers_[index] = std::make_unique<gbrowser::webview::capture::Observer>(
+          views_[index].core.Get(), capture_, index, [this, index, generation] {
+            return !closing_ && CurrentView(index, generation) && capture_game_[index];
+          });
+      capture_observers_[index]->Tick();
+      ConfigureCooldown(index);
+    }
     auto core = views_[index].core;
     const auto generation = view_generations_[index];
     EventRegistrationToken token{};
@@ -1609,6 +1644,8 @@ class Host {
   }
   void CloseLeftGame() {
     ++view_generations_[kLeftGame]; // Invalidate callbacks without releasing pending creation.
+    capture_observers_[kLeftGame].reset(); capture_game_[kLeftGame] = false;
+    skill_snapshots_[kLeftGame] = gbrowser::webview::cooldown::Snapshot{}; skill_routes_[kLeftGame].clear();
     if (views_[kLeftGame].controller) Check(views_[kLeftGame].controller->Close());
     views_[kLeftGame] = {};
     left_requested_source_.clear();
@@ -2075,6 +2112,8 @@ class Host {
     if (index < gbrowser::webview::TabSlots::kFirst || index >= views_.size() || view_generations_[index] != generation) return;
     const gbrowser::webview::TabSlots::Ticket ticket{index, generation};
     if (!tab_slots_.Current(ticket)) return;
+    capture_observers_[index].reset(); capture_game_[index] = false;
+    skill_snapshots_[index] = gbrowser::webview::cooldown::Snapshot{}; skill_routes_[index].clear();
     RemoveTabLabel(index);
     if (tab_slots_.Cancel(ticket)) {
       const auto started = GetTickCount64();
@@ -2301,7 +2340,7 @@ class Host {
   void RefreshProfileTitle() {
     if (!window_) return;
     const auto title = std::wstring(L"StarryFish · ") + profiles_->Find(active_profile_).name +
-        (mode_ == RunMode::Offline ? L" · 离线验证" : L"");
+        (mode_ == RunMode::Offline ? L" · 离线验证" : L"") + capture_.Label();
     SetWindowTextW(window_, title.c_str());
     SetWindowTextW(buttons_[0], title.c_str());
   }
@@ -2319,6 +2358,20 @@ class Host {
   }
   void Action(int id) {
     if (closing_) return;
+    if (id == kSkillCooldown) {
+      if (!skill_enabled_ && (failed_ || loaded_ != 4)) return;
+      if (!skill_overlay_) skill_overlay_ = std::make_unique<gbrowser::webview::cooldown::Overlay>(window_, theme_, kSkillCooldown);
+      skill_enabled_ = !skill_enabled_;
+      for (size_t index = 0; index < capture_observers_.size(); ++index) ConfigureCooldown(index);
+      RefreshCooldown(); return;
+    }
+    if (id == kCaptureStop) { capture_.Stop(); CaptureTick(); return; }
+    if (id == kCaptureClear) { capture_.Clear(); CaptureTick(); return; }
+    if (id == kCaptureInfo) {
+      const auto message = L"本机 MCP：以本程序路径启动 --capture-mcp --browser-pid " + std::to_wstring(GetCurrentProcessId()) +
+          L"\nAgent 显式启动后采集 GBF 游戏视图；正文先脱敏，仅在内存保留。\n默认 2 分钟，最长 10 分钟。菜单可停止或清除。";
+      MessageBoxW(window_, message.c_str(), L"GBF 网络抓取", MB_OK | MB_ICONINFORMATION); return;
+    }
     if (id == kCacheToggle) {
       try {
         if (!cache_setting_) throw std::runtime_error("cache setting unavailable");
@@ -2407,12 +2460,23 @@ class Host {
         AppendMenuW(menu, MF_STRING, kNewTab, L"新建标签\tCtrl+T");
         AppendMenuW(menu, MF_STRING, kProxySettings, L"ZeroOmega设置");
         AppendMenuW(menu, MF_STRING, kDownloads, L"下载");
-        AppendMenuW(menu, MF_STRING, kMoba, panes_.moba_visible ? L"关闭左侧moba栏" : L"开启左侧moba栏");
-        AppendMenuW(menu, MF_STRING, kSecondaryMenu, panes_.secondary_menu_hidden ?
-            L"显示副窗口右侧菜单" : L"隐藏副窗口右侧菜单并收窄");
-        AppendMenuW(menu, MF_STRING | (hide_loading_ ? MF_CHECKED : 0), kHideLoading, L"隐藏GBF加载小人和文字");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
       }
+      HMENU features = CreatePopupMenu();
+      if (!features) { DestroyMenu(menu); throw std::runtime_error("无法创建功能菜单"); }
+      const UINT available = failed_ || loaded_ != 4 ? MF_GRAYED : 0;
+      AppendMenuW(features, MF_STRING | available | (skill_enabled_ ? MF_CHECKED : 0), kSkillCooldown, L"技能 CD 悬浮条");
+      AppendMenuW(features, MF_SEPARATOR, 0, nullptr);
+      AppendMenuW(features, MF_STRING | available, kMoba, panes_.moba_visible ? L"关闭左侧moba栏" : L"开启左侧moba栏");
+      AppendMenuW(features, MF_STRING | available, kSecondaryMenu, panes_.secondary_menu_hidden ?
+          L"显示副窗口右侧菜单" : L"隐藏副窗口右侧菜单并收窄");
+      AppendMenuW(features, MF_STRING | available | (hide_loading_ ? MF_CHECKED : 0), kHideLoading, L"隐藏GBF加载小人和文字");
+      AppendMenuW(features, MF_SEPARATOR, 0, nullptr);
+      AppendMenuW(features, MF_STRING, kCaptureInfo, L"网络抓取（MCP）");
+      AppendMenuW(features, MF_STRING, kCaptureStop, L"停止网络抓取");
+      AppendMenuW(features, MF_STRING, kCaptureClear, L"清除网络抓取记录");
+      AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(features), L"功能");
+      AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
       AppendMenuW(menu, MF_STRING | (!theme_.dark() ? MF_CHECKED : 0), kLightTheme, L"浅色天蓝");
       AppendMenuW(menu, MF_STRING | (theme_.dark() ? MF_CHECKED : 0), kDarkTheme, L"深色群青");
       AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -2537,6 +2601,10 @@ class Host {
       Notice(L"下载窗口未切换，请稍后重试");
   }
   void Close() {
+    skill_enabled_ = false; skill_overlay_.reset();
+    capture_server_.reset(); capture_.Clear();
+    for (auto& observer : capture_observers_) observer.reset();
+    KillTimer(window_, 9);
     if (!closing_) timings_.Mark("normal-close-requested");
     if (profile_dialog_) profile_dialog_->Close();
     CancelSplit();
@@ -2897,6 +2965,7 @@ class Host {
     if (main_frame && message == WM_WINDOWPOSCHANGED) {
       const auto flags = reinterpret_cast<WINDOWPOS*>(lparam)->flags;
       if (!(flags & SWP_NOMOVE) || !(flags & SWP_NOSIZE)) host->InvalidateChrome();
+      host->Guard([&] { host->RefreshCooldown(); });
       // Continue to DefWindowProc: it emits the normal WM_SIZE/WM_MOVE events.
     }
     if (message == WM_ERASEBKGND) {
@@ -3073,6 +3142,7 @@ class Host {
     if (message == WM_ENABLE && wparam) host->Guard([&] { host->RefreshProfileTitle(); });
     if (message == WM_CLOSE) { host->Close(); return 0; }
     if (message == WM_TIMER) {
+      if (wparam == 9) host->CaptureTick();
       if (wparam == 8) host->Guard([&] { host->ResumeLogin(); });
       if (wparam == 6) host->CompleteCacheJobs();
       if (wparam == 7) host->PollProxyMenu();
@@ -3120,6 +3190,44 @@ class Host {
   gbrowser::webview::TimingLog timings_;
   std::vector<std::filesystem::path> sources_;
   std::vector<std::shared_ptr<const ExtensionPage>> pages_;
+  void CaptureTick() noexcept {
+    try {
+      for (auto& observer : capture_observers_) if (observer) observer->Tick();
+      RefreshCooldown();
+      const auto label = capture_.Label();
+      if (label != capture_label_) { capture_label_ = label; RefreshProfileTitle(); }
+    } catch (...) { capture_.Stop(); }
+  }
+  void ConfigureCooldown(size_t index) {
+    if (!capture_observers_[index]) return;
+    const auto generation = view_generations_[index];
+    capture_observers_[index]->Listen(skill_enabled_, [this, index, generation](const gbrowser::webview::cooldown::Snapshot& snapshot) {
+      if (closing_ || !CurrentView(index, generation)) return;
+      skill_snapshots_[index] = skill_routes_[index].empty() ? gbrowser::webview::cooldown::Snapshot{} : snapshot;
+      RefreshCooldown();
+    }, [this, index, generation](const std::string& document) {
+      if (closing_ || !CurrentView(index, generation) || skill_routes_[index].empty()) return false;
+      const auto route = gbrowser::webview::cooldown::BattleRoute(document);
+      return route.empty() || route == skill_routes_[index];
+    });
+  }
+  void RefreshCooldown() {
+    if (!skill_overlay_) return;
+    if ((skill_view_ == kLeftGame && !panes_.dual) || (skill_view_ != kLeftGame && skill_view_ != active_))
+      skill_view_ = gbrowser::webview::GameSurface(active_) ? active_ : 0;
+    skill_overlay_->Update(skill_snapshots_[skill_view_], skill_view_ == kLeftGame);
+    skill_overlay_->Align(skill_enabled_ && !closing_ && !failed_);
+  }
+  bool skill_enabled_ = false;
+  size_t skill_view_ = 0;
+  std::unique_ptr<gbrowser::webview::cooldown::Overlay> skill_overlay_;
+  std::array<gbrowser::webview::cooldown::Snapshot, gbrowser::webview::TabSlots::kViewCount> skill_snapshots_;
+  std::array<std::string, gbrowser::webview::TabSlots::kViewCount> skill_routes_;
+  gbrowser::webview::capture::Session capture_;
+  std::unique_ptr<gbrowser::webview::capture::Server> capture_server_;
+  std::array<std::unique_ptr<gbrowser::webview::capture::Observer>, gbrowser::webview::TabSlots::kViewCount> capture_observers_;
+  std::array<bool, gbrowser::webview::TabSlots::kViewCount> capture_game_{};
+  std::wstring capture_label_;
   std::array<ComPtr<ICoreWebView2BrowserExtension>, 4> extensions_;
   std::array<View, gbrowser::webview::TabSlots::kViewCount> views_;
   std::array<uint64_t, gbrowser::webview::TabSlots::kViewCount> view_generations_{};
@@ -3222,11 +3330,22 @@ bool StartGameCandidate() noexcept {
 
 int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int show) {
   const auto command = std::wstring_view(GetCommandLineW());
+  int argument_count = 0;
+  auto arguments = CommandLineToArgvW(GetCommandLineW(), &argument_count);
+  if (arguments && argument_count >= 2 && std::wstring_view(arguments[1]) == L"--capture-mcp") {
+    DWORD browser_pid = 0;
+    if (argument_count == 4 && std::wstring_view(arguments[2]) == L"--browser-pid") {
+      wchar_t* end = nullptr; const auto parsed = wcstoul(arguments[3], &end, 10);
+      if (end && !*end && parsed) browser_pid = parsed;
+    }
+    LocalFree(arguments); return gbrowser::webview::capture::RunMcp(browser_pid);
+  }
+  LocalFree(arguments);
   const auto plan = gbrowser::webview::NativeLaunchPlan(command);
   // The candidate has not ported CEF's ancestry-aware fixed-site policy. Do
   // not silently reinterpret its fixed-mode switch as open networking.
   if (!plan) return 2;
-  if (FAILED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED))) return 3;
+  if (FAILED(RoInitialize(RO_INIT_SINGLETHREADED))) return 3;
   int result = 3;
   bool restart = false;
   const wchar_t* phase = L"启动候选";
@@ -3269,7 +3388,7 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int show) {
         L"。\n若刚切换资料失败，关闭本提示后重新打开程序会返回上次成功资料。\n请从自己的普通PowerShell或文件资源管理器启动。\n若提示运行库，请安装微软稳定版WebView2 Runtime：\nhttps://developer.microsoft.com/microsoft-edge/webview2/\n\n现有CEF及资料保留，不绕过资料目录核验。";
     MessageBoxW(nullptr, explanation.c_str(), L"StarryFish 启动未完成", MB_OK | MB_ICONERROR);
   }
-  CoUninitialize();
+  RoUninitialize();
   // Host destruction above releases every runtime/source/application lock.
   // If shutdown was unknown or failed, execution never reaches a relaunch.
   if (restart && !StartGameCandidate()) {

@@ -219,8 +219,12 @@ class UiTheme {
     std::vector<std::unique_ptr<MenuItem>> items;
     for (int i=0;i<GetMenuItemCount(menu);++i) {
       wchar_t text[256]{}; MENUITEMINFOW info{sizeof(info)};
-      info.fMask=MIIM_FTYPE|MIIM_STRING|MIIM_STATE; info.dwTypeData=text; info.cch=256;
+      info.fMask=MIIM_FTYPE|MIIM_STRING|MIIM_STATE|MIIM_SUBMENU; info.dwTypeData=text; info.cch=256;
       if (!GetMenuItemInfoW(menu,static_cast<UINT>(i),TRUE,&info)) continue;
+      if (info.hSubMenu) {
+        auto children = PrepareMenu(info.hSubMenu);
+        for (auto& child : children) items.push_back(std::move(child));
+      }
       auto item=std::make_unique<MenuItem>(); item->text=text;
       item->separator=(info.fType&MFT_SEPARATOR)!=0; item->checked=(info.fState&MFS_CHECKED)!=0;
       info.fMask=MIIM_FTYPE|MIIM_DATA; info.fType|=MFT_OWNERDRAW; info.dwItemData=reinterpret_cast<ULONG_PTR>(item.get());

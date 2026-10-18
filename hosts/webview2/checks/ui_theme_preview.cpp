@@ -1,6 +1,7 @@
 #include "ui_theme.h"
 #include "compact_chrome.h"
 #include "convenience_layout.h"
+#include "skill_overlay.h"
 #include <iostream>
 #include <stdexcept>
 #include <cmath>
@@ -146,6 +147,67 @@ int wmain(int argc,wchar_t** argv) {
       std::unique_ptr<Gdiplus::Bitmap> image(canvas.Clone(0,0,scale(80),scale(34),PixelFormat32bppARGB));
       Require(image && image->Save((output/(dark?L"tabs-overlap-dark.png":L"tabs-overlap-light.png")).c_str(),&png,nullptr)==Gdiplus::Ok,
           "cannot save overlapping tab drawing");
+    }
+    for (bool dark : {false, true}) {
+      theme.SetDark(dark);
+      theme.Background(dc, scaled({0, 0, 1100, 640}));
+      cooldown::Snapshot sample;
+      sample.cells = {{{0, 4, 0, 0}, {6, 12, 0, -1}, {5, 0, 0, -1}, {7, 10, 8, -1}}};
+      cooldown::PaintStrip(dc, theme, dpi, sample, false, true);
+      SetViewportOrgEx(dc, 0, scale(66), nullptr);
+      cooldown::PaintStrip(dc, theme, dpi, cooldown::Snapshot{}, true, false);
+      SetViewportOrgEx(dc, 0, 0, nullptr);
+      Gdiplus::Bitmap canvas(bitmap, nullptr);
+      std::unique_ptr<Gdiplus::Bitmap> strip(canvas.Clone(0, 0, scale(cooldown::kStripWidth), scale(122), PixelFormat32bppARGB));
+      Require(strip && strip->Save((output / (dark ? L"skill-cd-dark.png" : L"skill-cd-light.png")).c_str(), &png, nullptr) == Gdiplus::Ok,
+          "cannot save skill cooldown preview");
+      theme.Background(dc, scaled({0, 0, 1100, 640}));
+      int row_top = 0;
+      for (int percent : {50, 75, 100, 150, 200}) {
+        const auto render_dpi = cooldown::FittedDpi(dpi, percent, scale(1100), scale(640));
+        Require(render_dpi == static_cast<unsigned>(MulDiv(static_cast<int>(dpi), percent, 100)), "CD manual scaling ignores DPI");
+        SetViewportOrgEx(dc, 0, row_top, nullptr);
+        cooldown::PaintStrip(dc, theme, render_dpi, sample, false, true);
+        SetViewportOrgEx(dc, 0, 0, nullptr);
+        row_top += MulDiv(cooldown::kStripHeight, static_cast<int>(render_dpi), 96) + scale(12);
+      }
+      Gdiplus::Bitmap scaled_canvas(bitmap, nullptr);
+      std::unique_ptr<Gdiplus::Bitmap> scales(scaled_canvas.Clone(0, 0, scale(1000), row_top, PixelFormat32bppARGB));
+      Require(scales && scales->Save((output / (dark ? L"skill-cd-scales-dark.png" : L"skill-cd-scales-light.png")).c_str(), &png, nullptr) == Gdiplus::Ok,
+          "cannot save scaled cooldown preview");
+    }
+    Require(cooldown::ResizePercent(100, {500, 54}, {250, 27}) == 150 &&
+        cooldown::ResizePercent(100, {1000, 108}, {-500, -54}) == 50 &&
+        cooldown::ResizePercent(75, {375, 41}, {375, 41}) == 150 &&
+        cooldown::ResizePercent(100, {500, 54}, {5000, 540}) == 200 &&
+        cooldown::ResizePercent(100, {500, 54}, {-5000, -540}) == 50 &&
+        cooldown::ResizePercent(75, {0, 0}, {0, 0}) == 75, "CD resize projection/bounds failed");
+    for (const auto viewport : {SIZE{250, 600}, SIZE{1000, 27}, SIZE{1000, 600}}) {
+      const auto fitted = cooldown::FittedDpi(192, 200, viewport.cx, viewport.cy);
+      Require(MulDiv(cooldown::kStripWidth, static_cast<int>(fitted), 96) <= viewport.cx &&
+          MulDiv(cooldown::kStripHeight, static_cast<int>(fitted), 96) <= viewport.cy, "CD scaling escaped viewport");
+    }
+    HMENU menu = CreatePopupMenu(), features = CreatePopupMenu();
+    AppendMenuW(features, MF_STRING | MF_CHECKED, 142, L"技能 CD 悬浮条");
+    AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(features), L"功能");
+    const auto menu_items = theme.PrepareMenu(menu);
+    MENUITEMINFOW info_menu{sizeof(info_menu)}; info_menu.fMask = MIIM_DATA | MIIM_FTYPE | MIIM_ID;
+    Require(menu_items.size() == 2 && GetMenuItemInfoW(features, 0, TRUE, &info_menu) && info_menu.wID == 142 &&
+        (info_menu.fType & MFT_OWNERDRAW) && info_menu.dwItemData, "nested functional menu lost native command or theme");
+    DestroyMenu(menu);
+    {
+      cooldown::Overlay overlay(owner, theme, 142);
+      overlay.Update(cooldown::Snapshot{}, true); overlay.Align(true);
+      const auto floating = FindWindowW(L"StarryFish.SkillCooldown", nullptr);
+      Require(floating && GetWindow(floating, GW_OWNER) == owner && !IsWindowVisible(floating),
+          "CD overlay ownership/hidden owner boundary failed");
+      const auto style = GetWindowLongPtrW(floating, GWL_EXSTYLE);
+      Require((style & WS_EX_NOACTIVATE) && (style & WS_EX_TOOLWINDOW) && !(style & WS_EX_TOPMOST),
+          "CD overlay stole activation or became global topmost");
+      SendMessageW(floating, WM_CLOSE, 0, 0);
+      MSG close{};
+      Require(PeekMessageW(&close, owner, WM_COMMAND, WM_COMMAND, PM_REMOVE) && LOWORD(close.wParam) == 142,
+          "CD close bypassed shared menu toggle");
     }
     SelectObject(dc,old);DeleteObject(bitmap);DeleteDC(dc);DeleteObject(font);DestroyWindow(owner);
     std::cout<<"PASS offscreen palettes; browser NOT_STARTED\n";return 0;

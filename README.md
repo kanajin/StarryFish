@@ -10,7 +10,7 @@
 
 ## 下载与安装
 
-v0.1.8 改进 GBF 战斗历史后退，以及 Mobage 登录弹窗关闭后的页面恢复。
+v0.1.9 新增可拖动、等比例缩放的技能 CD 悬浮条，以及本机 MCP 抓包接口；入口集中在三点 → 功能。
 
 在 [Releases](https://github.com/kanajin/StarryFish/releases/latest) 下载 **StarryFish-版本-windows-x64-setup.exe**，直接运行单个安装器，无需解压。
 
@@ -26,7 +26,9 @@ v0.1.8 改进 GBF 战斗历史后退，以及 Mobage 登录弹窗关闭后的页
 - 两种布局：紧凑侧栏 / 经典双排工具栏；浅色天蓝、深色群青。两布局采用网页图标标签，空间不足时重叠排列；均提供刷新按钮。界面需求见 [UI_REQUIREMENTS.md](docs/UI_REQUIREMENTS.md)。
 - 独立用户资料、代理选择与窗口布局记忆。
 - 代理菜单读取 ZeroOmega 的自定义情景模式并支持切换，实际配置匹配的当前模式显示勾选。
-- 三点菜单可隐藏 GBF 加载界面中的角色和 “Now Loading...” 文字，保留暗色加载背景。
+- 三点 → 功能可隐藏 GBF 加载界面中的角色和 “Now Loading...” 文字，保留暗色加载背景。
+- 技能 CD 悬浮条：读取技能使用、刷新、攻击及同结构结算响应；四角色分组、四技能固定格，支持拖动、50%–200% 等比例缩放、双击右下角恢复、悬停关闭及主/副窗跟随。亮格为 CD 0，× 为缺少技能，? 为未知；不自动操作游戏。
+- 本机 MCP：显式限时采集 GBF 游戏视图网络事件，正文脱敏、仅内存保留，可分页读取、停止或清除。连接和数据边界见 [网络抓包接口](docs/NETWORK_CAPTURE.md)。
 - 多标签，＋/Ctrl+T 新建，Ctrl+W 或中键关闭普通标签；固定 GBF 主标签保留。
 - 双游戏窗口；箭头点击一次把右侧当前网址同步到副窗，相同网址则刷新副窗。
 - 太郎与肉鸽侧栏支持开关、分隔调整及拆出窗口。
@@ -64,7 +66,7 @@ python -B build.py test
 python -B build.py verify
 python -B build.py package-setup
 cd ../..
-python -B tools/package_release.py 0.1.8
+python -B tools/package_release.py 0.1.9
 ```
 
 依赖从官方固定 URL 获取并验证 SHA256。太郎/肉鸽固定快照仅用于构建检查；终端用户首装可解析上游最新版本，或选择两个本地 ZIP。包输出在 `dist/`。推送 `main` 会构建并保留检查产物，推送 `v*` 标签会额外发布 GitHub Release；工作流不会访问或上传本地用户资料。发布新版本前需同时更新 `VERSION` 与 `RELEASE_NOTES.md`，标签版本必须与 `VERSION` 一致。
