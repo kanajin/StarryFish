@@ -24,6 +24,8 @@
 #include <iostream>
 #include <stdexcept>
 void RunResourceCacheChecks(const std::filesystem::path& root);
+void RunDualTransitionChecks();
+void RunShutdownChecks();
 
 namespace {
 void Require(bool value, const char* message) { if (!value) throw std::runtime_error(message); }
@@ -55,6 +57,8 @@ int wmain(int argc, wchar_t** argv) {
       return 0;
     }
     Require(argc == 2, "one isolated test directory required");
+    RunDualTransitionChecks();
+    RunShutdownChecks();
     {
       using gbrowser::webview::LoginResume;
       using gbrowser::webview::LoginResumeEntry;
@@ -304,8 +308,9 @@ int wmain(int argc, wchar_t** argv) {
       const auto closed = webview::PrimaryAnchoredResize(*opened, -406, -406, work, 400);
       Require(closed && closed->left == outer.left && closed->right == outer.right,
           "dual closing did not retract from the left");
-      Require(!webview::PrimaryAnchoredResize(RECT{50, 0, 950, 800}, 406, 406, work, 400),
-          "insufficient left work area silently moved primary game");
+      const auto fallback = webview::PrimaryAnchoredResize(RECT{50, 0, 950, 800}, 406, 406, work, 400);
+      Require(fallback && fallback->left == work.left && fallback->right == 1306,
+          "insufficient left work area did not expand toward the right");
       for (const auto* bad : {"GBWV-PANES-2\n1 0 0 1 0\n", "GBWV-PANES-1\n1 2 0 1 0\n",
           "GBWV-PANES-1\n1 0 0 1 0\nextra", "GBWV-PANES-1\n1 0 0 1\n"}) {
         bool rejected = false; try { webview::DecodePaneState(bad); } catch (...) { rejected = true; }

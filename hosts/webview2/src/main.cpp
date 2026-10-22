@@ -26,6 +26,8 @@
 #include "proxy_profiles.h"
 #include "bookmark_navigation.h"
 #include "convenience_layout.h"
+#include "dual_transition.h"
+#include "callback_gate.h"
 #include "game_copy.h"
 #include "browser_history.h"
 #include "login_resume.h"
@@ -68,6 +70,7 @@ constexpr int kCaptureStop = 139, kCaptureInfo = 140, kCaptureClear = 141;
 constexpr int kSkillCooldown = 142;
 constexpr UINT kCacheResult = WM_APP + 10;
 constexpr UINT kProxyMenuReady = WM_APP + 11;
+constexpr UINT_PTR kShutdownTimer = 11;
 constexpr int kProxyProfileFirst = 3000;
 constexpr UINT kShowNotice = WM_APP + 8;
 constexpr UINT kMeasureSecondaryMenu = WM_APP + 9;
@@ -117,6 +120,7 @@ struct View {
   ComPtr<ICoreWebView2Controller> controller; ComPtr<ICoreWebView2> core;
   std::optional<RECT> bounds;
   std::optional<bool> visible;
+  std::optional<POINT> parent_position;
   // All host writes pass here; Configure resets caches for each new controller.
   // Failed setters never publish a cached success.
   void Bounds(RECT next) {
@@ -124,6 +128,18 @@ struct View {
   }
   void Visible(bool next) {
     if (!visible || *visible != next) { Check(controller->put_IsVisible(next)); visible = next; }
+  }
+  void Reparent(HWND parent) {
+    Check(controller->put_ParentWindow(parent)); bounds.reset(); parent_position.reset();
+  }
+  void NotifyPosition() {
+    if (!controller || !visible.value_or(false)) return;
+    HWND parent = nullptr; Check(controller->get_ParentWindow(&parent));
+    POINT point{};
+    if (ClientToScreen(parent, &point) && (!parent_position ||
+        parent_position->x != point.x || parent_position->y != point.y)) {
+      Check(controller->NotifyParentWindowPositionChanged()); parent_position = point;
+    }
   }
 };
 // Both official popup paths must retain the deferral until binding finishes.
@@ -232,6 +248,7 @@ class Host {
     } catch (...) { cache_enabled_ = false; }
   }
   ~Host() {
+    callbacks_.Cancel(); lifecycle_callbacks_.Cancel();
     // Synchronous startup can fail before the message pump owns shutdown.
     // Startup failure has no game stream jobs. Stop its optional cache scan
     // before destroying the notification HWND; normal close already drained it.
@@ -347,8 +364,8 @@ class Host {
       return CreateWindowW(L"STATIC", L"", WS_CHILD | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
           0, 0, 10, 10, window_, nullptr, instance, nullptr);
     };
-    right_frame_ = frame(); left_frame_ = frame(); arcarum_frame_ = frame();
-    for (HWND item : {right_frame_, left_frame_, arcarum_frame_})
+    right_frame_ = frame(); left_frame_ = frame(); arcarum_frame_ = frame(); tarou_frame_ = frame();
+    for (HWND item : {right_frame_, left_frame_, arcarum_frame_, tarou_frame_})
       if (!item || !SetWindowSubclass(item, FrameProcedure, 3, reinterpret_cast<DWORD_PTR>(this)))
         throw std::runtime_error("无法创建游戏及助手裁剪容器");
     if (!address_ || !tabs_) throw std::runtime_error("无法创建游戏工具栏");
@@ -409,7 +426,8 @@ class Host {
                 ComPtr<ICoreWebView2Environment5> lifecycle; Check(environment_.As(&lifecycle));
                 EventRegistrationToken token{};
                 Check(lifecycle->add_BrowserProcessExited(Callback<ICoreWebView2BrowserProcessExitedEventHandler>(
-                    [this](ICoreWebView2Environment*, ICoreWebView2BrowserProcessExitedEventArgs* args) -> HRESULT {
+                    [this, lifetime = lifecycle_callbacks_.Track()](ICoreWebView2Environment*, ICoreWebView2BrowserProcessExitedEventArgs* args) -> HRESULT {
+                      if (!lifetime.Active()) return S_OK;
                       Guard([&] {
                         UINT32 pid = 0; Check(args->get_BrowserProcessId(&pid));
                         if (!browser_pid_ || pid == browser_pid_) {
@@ -445,6 +463,7 @@ class Host {
     failed_ = true; proxy_verified_ = false; ++cache_network_epoch_; ++cache_epoch_;
     if (proxy_) proxy_->Invalidate(3);
     if (window_) { KillTimer(window_, 2); KillTimer(window_, 3); }
+    dual_transition_.Cancel();
     Notice(text);
   }
   void Guard(const std::function<void()>& action) noexcept {
@@ -457,7 +476,7 @@ class Host {
   }
   void CreateView(size_t index) {
     ++pending_;
-    const auto result = environment_->CreateCoreWebView2Controller(index == 0 ? right_frame_ : window_,
+    const auto result = environment_->CreateCoreWebView2Controller(index == 0 ? right_frame_ : index == 1 ? tarou_frame_ : window_,
         Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
             [this, index](HRESULT error, ICoreWebView2Controller* controller) -> HRESULT {
               --pending_;
@@ -502,15 +521,15 @@ class Host {
         (BrowsingAvailable() && IsBrowserNetworkUrl(url));
   }
   void Configure(size_t index, bool defer_resources = false) {
-    views_[index].bounds.reset(); views_[index].visible.reset();
-    moba_css_[index] = 0;
+    views_[index].bounds.reset(); views_[index].visible.reset(); views_[index].parent_position.reset();
+    moba_css_[index] = 0; menu_css_[index] = 0;
     auto core = views_[index].core;
     const auto generation = view_generations_[index];
     EventRegistrationToken token{};
     if (gbrowser::webview::GameSurface(index)) Check(views_[index].controller->add_ZoomFactorChanged(
         Callback<ICoreWebView2ZoomFactorChangedEventHandler>(
             [this, index, generation](ICoreWebView2Controller*, IUnknown*) -> HRESULT {
-              Guard([&] { if (!closing_ && CurrentView(index, generation)) Layout(); }); return S_OK;
+              Guard([&] { if (!closing_ && CurrentView(index, generation)) LayoutGameView(index); }); return S_OK;
             }).Get(), &token));
     if (index != 2 && index != 3 && !IsAuxiliary(index))
       Check(views_[index].controller->add_AcceleratorKeyPressed(
@@ -658,7 +677,7 @@ class Host {
               // the same inset again. Non-game documents must never inherit it.
               const auto source = WideToUtf8(ComText([&](LPWSTR* value) { return views_[index].core->get_Source(value); }));
               const int inset = gbrowser::webview::RetainedGameInset(moba_css_[index], source);
-              if (inset != moba_css_[index]) { moba_css_[index] = inset; Layout(); }
+              if (inset != moba_css_[index]) { moba_css_[index] = inset; LayoutGameView(index); }
             }
             if (index == active_) UpdateAddress();
             if (CurrentView(index, generation) && index == 0 && !closing_) { ++game_source_epoch_; PinArcarumTarget(); }
@@ -757,19 +776,22 @@ class Host {
                   const auto origin = (generation << 8) | index;
                   PostMessageW(window_, kPageShortcut, static_cast<WPARAM>(message == L"gbrowser:back" ? Shortcut::Back : Shortcut::Forward),
                       static_cast<LPARAM>(origin));
-                } else if (index == kLeftGame && message.substr(0, 17) == L"gbrowser:submenu:") {
+                } else if (gbrowser::webview::GameSurface(index) && message.substr(0, 17) == L"gbrowser:submenu:") {
                   const auto digits = message.substr(17);
                   if (digits.empty() || digits.size() > 3 || digits.find_first_not_of(L"0123456789") != std::wstring_view::npos) return;
                   const int css = std::stoi(std::wstring(digits));
                   if (css > 0 && css <= 512) {
-                    double zoom = 1; Check(views_[index].controller->get_ZoomFactor(&zoom));
-                    UpdateSecondaryMenu(panes_.secondary_menu_hidden, static_cast<int>(css * zoom * Dpi() / 96.0 + 0.5));
+                    menu_css_[index] = css;
+                    if (index == kLeftGame) {
+                      last_secondary_menu_width_ = MeasuredSecondaryWidth(index);
+                      last_secondary_menu_dpi_ = Dpi();
+                    }
                   }
                 } else if (gbrowser::webview::GameSurface(index) && message.substr(0, 14) == L"gbrowser:moba:") {
                   const auto digits = message.substr(14);
                   if (digits.empty() || digits.size() > 3 || digits.find_first_not_of(L"0123456789") != std::wstring_view::npos) return;
                   const auto inset = std::stoi(std::wstring(digits));
-                  if (inset <= 256) { moba_css_[index] = inset; Layout(); }
+                  if (inset <= 256 && inset != moba_css_[index]) { moba_css_[index] = inset; LayoutGameView(index); }
                 }
               }); return S_OK;
             }).Get(), &token));
@@ -796,11 +818,11 @@ class Host {
   void InstallLoadingDisplay(size_t index) {
     const auto generation = view_generations_[index];
     const auto script = Utf8ToWide(std::string(kLoadingDisplayScript) + "();");
-    ++pending_;
+    const auto callback = callbacks_.Track();
     const auto result = views_[index].core->AddScriptToExecuteOnDocumentCreated(script.c_str(),
         Callback<ICoreWebView2AddScriptToExecuteOnDocumentCreatedCompletedHandler>(
-            [this, index, generation](HRESULT error, LPCWSTR) -> HRESULT {
-              --pending_;
+            [this, callback, index, generation](HRESULT error, LPCWSTR) -> HRESULT {
+              if (!callback.Complete()) return S_OK;
               if (!closing_ && CurrentView(index, generation)) {
                 if (FAILED(error)) timings_.Mark("loading-display-install-unavailable");
                 // Registration is asynchronous. Cover an already created first
@@ -809,7 +831,7 @@ class Host {
               }
               Drain(); return S_OK;
             }).Get());
-    if (FAILED(result)) { --pending_; timings_.Mark("loading-display-install-unavailable"); }
+    if (FAILED(result)) { callback.Complete(); timings_.Mark("loading-display-install-unavailable"); }
   }
   void ConfigureResources(size_t index) {
     if (gbrowser::webview::GameSurface(index)) {
@@ -893,9 +915,10 @@ class Host {
       auto entry = gbrowser::webview::cache::Admit(input, status, CacheHeaders(headers.Get()), gbrowser::webview::cache::Now());
       if (!entry) return;
       const auto epoch = cache_epoch_, navigation = navigation_epochs_[index];
-      ++pending_; ++cache_captures_;
+      const auto callback = callbacks_.Track(); ++cache_captures_;
       const auto hr = response->GetContent(Callback<ICoreWebView2WebResourceResponseViewGetContentCompletedHandler>(
-          [this, index, generation, epoch, navigation, entry = std::move(*entry)](HRESULT error, IStream* content) mutable -> HRESULT {
+          [this, callback, index, generation, epoch, navigation, entry = std::move(*entry)](HRESULT error, IStream* content) mutable -> HRESULT {
+            if (!callback.Complete()) return S_OK;
             --cache_captures_;
             try {
               if (SUCCEEDED(error) && content && CacheAllowed(index, generation) && epoch == cache_epoch_ &&
@@ -903,13 +926,13 @@ class Host {
                 ++pending_; ++cache_jobs_;
               }
             } catch (...) {} // A capture failure never interrupts gameplay.
-            --pending_; Drain(); return S_OK;
+            Drain(); return S_OK;
           }).Get());
-      if (FAILED(hr)) { --pending_; --cache_captures_; }
+      if (FAILED(hr)) { callback.Complete(); --cache_captures_; }
     } catch (...) {}
   }
   void CompleteCacheJobs() {
-    if (!resource_cache_) return;
+    if (!resource_cache_ || cache_stopping_) return;
     if (cache_initializing_ && resource_cache_->stats().initialized) { cache_initializing_ = false; --pending_; }
     for (auto& result : resource_cache_->Take()) {
       const auto found = cache_pending_.find(result.id);
@@ -969,10 +992,10 @@ class Host {
       StopNetworking(L"当前WebView2运行库不支持扩展接入；请更新微软Evergreen运行库后重启，现有资料保留");
       return;
     }
-    ++pending_;
+    const auto callback = callbacks_.Track();
     const auto result = profile_->GetBrowserExtensions(Callback<ICoreWebView2ProfileGetBrowserExtensionsCompletedHandler>(
-        [this](HRESULT error, ICoreWebView2BrowserExtensionList* list) -> HRESULT {
-          --pending_;
+        [this, callback](HRESULT error, ICoreWebView2BrowserExtensionList* list) -> HRESULT {
+          if (!callback.Complete()) return S_OK;
           Guard([&] {
             Check(error); if (closing_) return;
             if (!list) throw std::runtime_error("缺少扩展登记列表");
@@ -993,7 +1016,7 @@ class Host {
             LoadComponent(0);
           }); Drain(); return S_OK;
         }).Get());
-    if (FAILED(result)) { --pending_; Check(result); }
+    if (FAILED(result)) { callback.Complete(); Check(result); }
   }
   const gbrowser::webview::AcceptedComponent& Component(size_t index) const {
     return index < 3 ? catalogue_->entries().at(index) : scripts_component_;
@@ -1037,11 +1060,11 @@ class Host {
     // when the runtime reports no registration in this profile.
     const bool unchanged = index != 0 && registrations_->Matches(index, Component(index).tree);
     if (registered && unchanged) { ValidateComponent(index); return; }
-    ++pending_;
+    const auto callback = callbacks_.Track();
     const auto result = profile_->AddBrowserExtension(sources_[index].c_str(),
         Callback<ICoreWebView2ProfileAddBrowserExtensionCompletedHandler>(
-            [this, index](HRESULT error, ICoreWebView2BrowserExtension* extension) -> HRESULT {
-              --pending_;
+            [this, callback, index](HRESULT error, ICoreWebView2BrowserExtension* extension) -> HRESULT {
+              if (!callback.Complete()) return S_OK;
               Guard([&] {
                 Check(error); if (closing_) return;
                 if (!extension) throw std::runtime_error("缺少自动加载的扩展身份");
@@ -1049,7 +1072,7 @@ class Host {
                 ValidateComponent(index, index != 0);
               }); Drain(); return S_OK;
             }).Get());
-    if (FAILED(result)) { --pending_; Check(result); }
+    if (FAILED(result)) { callback.Complete(); Check(result); }
   }
   void RecordComponents() {
     // Public component facts only; not webpage URLs, login or extension storage.
@@ -1150,11 +1173,11 @@ class Host {
     const auto source = ComText([&](LPWSTR* value) { return views_[0].core->get_Source(value); });
     const auto recovery = login_resume_;
     if (!recovery.Matches(view_generations_[0], navigation_epochs_[0], login_attempt_, source)) return;
-    ++pending_;
+    const auto callback = callbacks_.Track();
     const auto result = views_[0].core->ExecuteScript(gbrowser::webview::kLoginChannelVisible,
         Callback<ICoreWebView2ExecuteScriptCompletedHandler>(
-            [this, recovery](HRESULT error, LPCWSTR json) -> HRESULT {
-              --pending_;
+            [this, callback, recovery](HRESULT error, LPCWSTR json) -> HRESULT {
+              if (!callback.Complete()) return S_OK;
               Guard([&] {
                 if (FAILED(error) || !json || std::wstring_view(json) != L"true" || closing_ || failed_ ||
                     login_window_ || login_pending_ || !BrowsingAvailable() || !views_[0].core) return;
@@ -1166,7 +1189,7 @@ class Host {
                 timings_.Mark("login-channel-entry-reloaded");
               }); Drain(); return S_OK;
             }).Get());
-    if (FAILED(result)) { --pending_; timings_.Mark("login-resume-probe-unavailable"); }
+    if (FAILED(result)) { callback.Complete(); timings_.Mark("login-resume-probe-unavailable"); }
   }
 
   static bool IsAuxiliary(size_t index) {
@@ -1284,11 +1307,11 @@ class Host {
     if (target_polling_) return;
     const auto generation = target_generation_;
     const auto document = document_generation_;
-    target_polling_ = generation; ++pending_;
+    target_polling_ = generation; const auto callback = callbacks_.Track();
     const auto result = views_[2].core->ExecuteScript(L"window.__gbrowserGameTarget || null",
         Callback<ICoreWebView2ExecuteScriptCompletedHandler>(
-            [this, generation, document](HRESULT error, LPCWSTR value) -> HRESULT {
-              --pending_;
+            [this, callback, generation, document](HRESULT error, LPCWSTR value) -> HRESULT {
+              if (!callback.Complete()) return S_OK;
               if (target_polling_ == generation) target_polling_ = 0;
               Guard([&] {
                 Check(error);
@@ -1333,7 +1356,7 @@ class Host {
               }
               Drain(); return S_OK;
             }).Get());
-    if (FAILED(result)) { --pending_; if (target_polling_ == generation) target_polling_ = 0; Check(result); }
+    if (FAILED(result)) { callback.Complete(); if (target_polling_ == generation) target_polling_ = 0; Check(result); }
   }
 
   void RestoreSavedProxy() {
@@ -1371,11 +1394,11 @@ class Host {
       if (!closing_) Notice(L"情景模式列表未能读取，请在ZeroOmega设置中核对");return;
     }
     const auto request=proxy_menu_request_,generation=proxy_menu_generation_;
-    proxy_menu_polling_=true;++pending_;
+    proxy_menu_polling_=true;const auto callback = callbacks_.Track();
     const auto script=L"window.__starryfishProxyMenuTake ? window.__starryfishProxyMenuTake("+std::to_wstring(request)+L") : null";
     const auto result=views_[2].core->ExecuteScript(script.c_str(),Callback<ICoreWebView2ExecuteScriptCompletedHandler>(
-        [this,request,generation](HRESULT error,LPCWSTR value) -> HRESULT {
-          --pending_;proxy_menu_polling_=false;
+        [this, callback,request,generation](HRESULT error,LPCWSTR value) -> HRESULT {
+          if (!callback.Complete()) return S_OK;proxy_menu_polling_=false;
           if (!closing_ && proxy_menu_loading_ && request==proxy_menu_request_ && generation==document_generation_) {
             const std::wstring_view encoded=value?value:L"null";
             if (FAILED(error) || encoded!=L"null") {
@@ -1390,7 +1413,7 @@ class Host {
           }
           Drain();return S_OK;
         }).Get());
-    if (FAILED(result)) {--pending_;proxy_menu_polling_=false;proxy_menu_loading_=false;KillTimer(window_,7);
+    if (FAILED(result)) {callback.Complete();proxy_menu_polling_=false;proxy_menu_loading_=false;KillTimer(window_,7);
       Notice(L"情景模式列表未能读取，请稍后重试");Drain();}
   }
   void ShowProxyMenu(uint64_t request) {
@@ -1471,11 +1494,11 @@ class Host {
     if (!proxy_->pending() && !proxy_->observing()) { KillTimer(window_, 2); return; }
     const auto operation = operation_;
     const auto generation = document_generation_;
-    polling_ = true; ++pending_;
+    polling_ = true; const auto callback = callbacks_.Track();
     const auto result = views_[2].core->ExecuteScript(L"window.__gbrowserProxyTake ? window.__gbrowserProxyTake() : null",
         Callback<ICoreWebView2ExecuteScriptCompletedHandler>(
-            [this, operation, generation](HRESULT error, LPCWSTR value) -> HRESULT {
-              --pending_; polling_ = false;
+            [this, callback, operation, generation](HRESULT error, LPCWSTR value) -> HRESULT {
+              if (!callback.Complete()) return S_OK; polling_ = false;
               Guard([&] {
                 if (closing_ || failed_ || !proxy_ || operation != operation_ || generation != document_generation_) return;
                 Check(error);
@@ -1545,7 +1568,7 @@ class Host {
                 }
               }); Drain(); return S_OK;
             }).Get());
-    if (FAILED(result)) { --pending_; polling_ = false; Check(result); }
+    if (FAILED(result)) { callback.Complete(); polling_ = false; Check(result); }
   }
   void ReloadPagesAfterProxySelection() {
     // Only the first successful readback after applying a selection reaches here.
@@ -1570,11 +1593,11 @@ class Host {
     const auto script = initialize ? std::wstring(L"window.__gbrowserProxyInitDiagnostic || 0") :
         L"window.__gbrowserProxySelectionDiagnostic && window.__gbrowserProxySelectionDiagnostic.operation === " +
         std::to_wstring(operation) + L" ? window.__gbrowserProxySelectionDiagnostic.category : 0";
-    ++pending_;
+    const auto callback = callbacks_.Track();
     const auto result = views_[2].core->ExecuteScript(script.c_str(),
         Callback<ICoreWebView2ExecuteScriptCompletedHandler>(
-            [this, operation, generation, initialize](HRESULT error, LPCWSTR value) -> HRESULT {
-              --pending_;
+            [this, callback, operation, generation, initialize](HRESULT error, LPCWSTR value) -> HRESULT {
+              if (!callback.Complete()) return S_OK;
               if (SUCCEEDED(error) && !closing_ && operation == operation_ && generation == document_generation_ && value) {
                 const std::wstring_view code(value);
                 // Accept a fixed numeric category only, never an error string,
@@ -1589,9 +1612,10 @@ class Host {
               }
               Drain(); return S_OK;
             }).Get());
-    if (FAILED(result)) { --pending_; Drain(); }
+    if (FAILED(result)) { callback.Complete(); Drain(); }
   }
   void SavePanes() noexcept {
+    if (dual_transition_.active()) return;
     try {
       auto stored = panes_;
       stored.group_percent = panel_percent_;
@@ -1608,6 +1632,92 @@ class Host {
     return gbrowser::webview::ComputePaneLayout(rect.right, rect.bottom,
         Dpi(), panel_percent_, panes_, arcarum_detached_, browser_layout_);
   }
+  RECT ResizeWorkArea(RECT outer, RECT work) const {
+    RECT visible{};
+    if (FAILED(DwmGetWindowAttribute(window_, DWMWA_EXTENDED_FRAME_BOUNDS, &visible, sizeof(visible))) ||
+        visible.right <= visible.left || visible.left < outer.left || visible.right > outer.right) {
+      const int border = GetSystemMetricsForDpi(SM_CXSIZEFRAME, Dpi()) + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, Dpi());
+      visible = outer;
+      visible.left += border; visible.right -= border;
+    }
+    return gbrowser::webview::OuterResizeWorkArea(outer, visible, work);
+  }
+  int MeasuredSecondaryWidth(size_t preferred) const {
+    if (menu_css_[preferred] > 0 && views_[preferred].controller) {
+      double zoom = 1; Check(views_[preferred].controller->get_ZoomFactor(&zoom));
+      return static_cast<int>(menu_css_[preferred] * zoom * Dpi() / 96.0 + 0.5);
+    }
+    if (last_secondary_menu_width_ > 0)
+      return MulDiv(last_secondary_menu_width_, static_cast<int>(Dpi()), static_cast<int>(last_secondary_menu_dpi_));
+    return MulDiv(panes_.secondary_menu_width, static_cast<int>(Dpi()), static_cast<int>(panes_.secondary_menu_dpi));
+  }
+  void LayoutGameView(size_t index) {
+    // Display-adapter messages are local to this renderer, and cannot move the
+    // outer window, primary frame, helpers or chrome. Defer during the commit.
+    if (dual_transition_.active() || !views_[index].controller ||
+        !(index == active_ || (index == kLeftGame && panes_.dual))) return;
+    const auto geometry = PaneGeometry();
+    const auto game = index == kLeftGame ? geometry.left : geometry.right;
+    const int cropped = !panes_.moba_visible ? MobaPixels(index) : 0;
+    views_[index].Bounds(gbrowser::webview::GameViewBounds(
+        {game.x, game.y, geometry.right.width, game.height}, cropped));
+  }
+  void CommitDualLayout() {
+    if (!dual_transition_.active() || closing_ || failed_) return;
+    const auto generation = dual_transition_.generation();
+    const bool committed = dual_transition_.Commit(generation, [&](const auto& plan) {
+      dual_positioning_ = true;
+      struct Reset { bool& value; ~Reset() { value = false; } } reset{dual_positioning_};
+      // Exactly one outer resize. Suppress its recursive WM_SIZE layout, then
+      // place all native containers once before allowing secondary creation.
+      const bool moved = SetWindowPos(window_, nullptr, plan.to.left, plan.to.top,
+          plan.to.right - plan.to.left, plan.to.bottom - plan.to.top,
+          SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS) != FALSE;
+      if (!moved) {
+        panes_ = dual_previous_panes_; panes_.dual = false;
+        CloseLeftGame(); single_window_.reset();
+        Notice(L"窗口尺寸调整未完成，已保留单窗");
+      }
+      if (closing_ || failed_) return false;
+      Layout(); PaintChromeNow();
+      return moved;
+    });
+    if (closing_ || failed_) return;
+    SaveLayout(); SavePanes(); RefreshCooldown();
+    if (committed) EnsurePaneView(kLeftGame);
+  }
+  void ChangeDualLayout() {
+    single_window_.reset();
+  }
+  void ReconcileDisplay(RECT proposed) {
+    dual_transition_.Cancel(); single_window_.reset();
+    if (IsIconic(window_)) return;
+    CancelSplit();
+    RECT outer{}; GetWindowRect(window_, &outer);
+    MONITORINFO monitor{sizeof(monitor)};
+    if (GetMonitorInfoW(MonitorFromRect(&proposed, MONITOR_DEFAULTTONEAREST), &monitor) && !IsZoomed(window_)) {
+      const auto work = ResizeWorkArea(outer, monitor.rcWork);
+      if (panes_.dual && MinimumWindowWidth() > work.right - work.left) {
+        panes_.dual = false; CloseLeftGame();
+        Notice(L"当前屏幕无法容纳双窗，已保留单窗");
+      }
+      const int width = (std::min)(static_cast<int>(work.right - work.left),
+          (std::max)(MinimumWindowWidth(), static_cast<int>(proposed.right - proposed.left)));
+      proposed.left = (std::clamp)(proposed.left, work.left, work.right - width);
+      proposed.right = proposed.left + width;
+    }
+    dual_positioning_ = true;
+    SetWindowPos(window_, nullptr, proposed.left, proposed.top, proposed.right - proposed.left,
+        proposed.bottom - proposed.top, SWP_NOZORDER | SWP_NOACTIVATE);
+    dual_positioning_ = false;
+    UpdateFont(); Layout(); RefreshCooldown(); SaveLayout(); SavePanes(); EnsurePaneView(kLeftGame);
+  }
+  void SecondaryCreationFailed() {
+    // A secondary creation/navigation failure must not stop the primary game.
+    CloseLeftGame();
+    if (panes_.dual && !closing_ && !failed_) ToggleDual();
+    Notice(L"副窗口创建未完成，已返回单窗；主游戏保持运行");
+  }
   int MobaPixels(size_t index) const {
     if (!moba_css_[index] || !views_[index].controller) return 0;
     double zoom = 1.0; Check(views_[index].controller->get_ZoomFactor(&zoom));
@@ -1619,7 +1729,7 @@ class Host {
   void CopyPrimaryToSecondary() {
     // One user action, one native dispatch. No source observers, timer, queue
     // or persisted switch can cause a later navigation or refresh.
-    if (!panes_.dual || !BrowsingAvailable() || !bound_game_id_) return;
+    if (!dual_transition_.CanCreate(panes_.dual) || !BrowsingAvailable() || !bound_game_id_) return;
     if (!views_[active_].core || !views_[kLeftGame].core) { Notice(L"请等待两个游戏窗口就绪，再点击箭头"); return; }
     const auto source = GameSource(active_);
     if (!Document(WideToUtf8(source))) return;
@@ -1630,6 +1740,7 @@ class Host {
     }
   }
   void ChangeWindowWidth(int delta) {
+    ChangeDualLayout();
     // Helper/Moba visibility changes resize the right edge. Saved game
     // width stays independent of the space available to docked helpers.
     if (IsZoomed(window_)) { Layout(); SaveLayout(); return; }
@@ -1653,6 +1764,7 @@ class Host {
   void EnsurePaneView(size_t index) {
     const bool desired = index == kLeftGame ? panes_.dual : panes_.arcarum;
     if (!BrowsingAvailable() || !bound_game_id_ || !desired) return;
+    if (index == kLeftGame && !dual_transition_.CanCreate(panes_.dual)) return;
     const auto source = index == kLeftGame && !left_requested_source_.empty() ? left_requested_source_ :
         ComText([&](LPWSTR* text) { return views_[0].core->get_Source(text); });
     if (!IsGbfPageUrl(WideToUtf8(source))) return;
@@ -1662,7 +1774,8 @@ class Host {
     if (views_[index].core) {
       if (index == kArcarumView && ComText([&](LPWSTR* text) { return views_[index].core->get_Source(text); }) == L"about:blank")
         Check(views_[index].core->Navigate(Utf8ToWide(pages_[2]->url()).c_str()));
-      Layout(); return;
+      if (index == kLeftGame) LayoutGameView(index); else Layout();
+      return;
     }
     if (pane_pending_[index - kLeftGame]) return;
     const auto generation = ++view_generations_[index];
@@ -1673,11 +1786,12 @@ class Host {
             [this, index, generation, source](HRESULT error, ICoreWebView2Controller* controller) -> HRESULT {
               --pending_; pane_pending_[index - kLeftGame] = false;
               const bool desired_now = index == kLeftGame ? panes_.dual : panes_.arcarum;
-              if (!BrowsingAvailable() || !desired_now || view_generations_[index] != generation) {
+              if (!BrowsingAvailable() || !desired_now || view_generations_[index] != generation ||
+                  (index == kLeftGame && !dual_transition_.CanCreate(panes_.dual))) {
                 if (controller) controller->Close();
                 Guard([&] { EnsurePaneView(index); }); Drain(); return S_OK;
               }
-              Guard([&] {
+              const auto configure = [&] {
                 Check(error); if (!controller) throw std::runtime_error("便利视图创建失败");
                 views_[index].controller = controller;
                 Check(controller->get_CoreWebView2(&views_[index].core));
@@ -1687,9 +1801,20 @@ class Host {
                 }
                 Configure(index); Layout();
                 Check(views_[index].core->Navigate(index == kLeftGame ? source.c_str() : Utf8ToWide(pages_[2]->url()).c_str()));
-              }); Drain(); return S_OK;
+              };
+              if (index == kLeftGame) {
+                try { configure(); }
+                catch (...) {
+                  if (controller && !views_[index].controller) controller->Close();
+                  Guard([&] { SecondaryCreationFailed(); });
+                }
+              } else Guard(configure);
+              Drain(); return S_OK;
             }).Get());
-    if (FAILED(result)) { --pending_; pane_pending_[index - kLeftGame] = false; Check(result); }
+    if (FAILED(result)) {
+      --pending_; pane_pending_[index - kLeftGame] = false;
+      if (index == kLeftGame) SecondaryCreationFailed(); else Check(result);
+    }
   }
   void PinArcarumTarget() {
     if (!BrowsingAvailable() || !bound_game_id_ || !panes_.arcarum || !views_[kArcarumView].core) return;
@@ -1705,9 +1830,10 @@ class Host {
     Check(views_[kArcarumView].core->ExecuteScript(Utf8ToWide(script).c_str(), nullptr));
   }
   void UpdateSecondaryMenu(bool hidden, int width) {
-    // A new crop needs an anchored outer resize; defer it until restored.
+    // Only an explicit menu action adopts a new measured crop. Page reloads
+    // update the measurement cache, never the current reserved pane width.
     if (IsZoomed(window_) || IsIconic(window_)) return;
-    if (split_.dragging() || helper_split_.dragging()) { pending_secondary_width_ = width; return; }
+    ChangeDualLayout();
     if (panes_.secondary_menu_hidden == hidden && panes_.secondary_menu_width == width && panes_.secondary_menu_dpi == Dpi()) return;
     CancelSplit();
     const auto before = PaneGeometry();
@@ -1721,8 +1847,8 @@ class Host {
       MONITORINFO monitor{}; monitor.cbSize = sizeof(monitor);
       if (!GetMonitorInfoW(MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST), &monitor)) { panes_ = previous; return; }
       const auto placement = gbrowser::webview::PrimaryAnchoredResize(outer, change, change,
-          monitor.rcWork, UiPixels(browser_layout_ ? 600 : 400, Dpi()));
-      if (!placement) { panes_ = previous; Notice(L"左侧空间不足，副窗口侧栏设置保持不变"); return; }
+          ResizeWorkArea(outer, monitor.rcWork), UiPixels(browser_layout_ ? 600 : 400, Dpi()));
+      if (!placement) { panes_ = previous; Notice(L"当前屏幕宽度不足，副窗口侧栏设置保持不变"); return; }
       SetWindowPos(window_, nullptr, placement->left, placement->top, placement->right - placement->left,
           placement->bottom - placement->top, SWP_NOZORDER | SWP_NOACTIVATE);
     }
@@ -1731,8 +1857,9 @@ class Host {
     Layout(); SaveLayout(); SavePanes();
   }
   void ToggleDual() {
+    if (dual_transition_.active() || closing_ || failed_) return;
     CancelSplit();
-    if (IsZoomed(window_)) { Notice(L"请先还原窗口，再切换双窗；主游戏位置保持不变"); return; }
+    if (IsZoomed(window_) || IsIconic(window_)) { Notice(L"请先还原窗口，再切换双窗"); return; }
     const auto before = PaneGeometry();
     RECT outer{}, client{}; GetWindowRect(window_, &outer); GetClientRect(window_, &client);
     MONITORINFO monitor{}; monitor.cbSize = sizeof(monitor);
@@ -1740,18 +1867,29 @@ class Host {
     const auto previous = panes_;
     panes_.dual = !panes_.dual;
     SetGameWidth(before.right.width);
+    if (panes_.dual) {
+      panes_.secondary_menu_width = MeasuredSecondaryWidth(active_);
+      panes_.secondary_menu_dpi = Dpi();
+    }
     const int change = panes_.dual ? before.right.width -
         gbrowser::webview::SecondaryMenuCut(panes_, Dpi(), before.right.width) + UiPixels(6, Dpi()) :
         -(before.left.width + UiPixels(6, Dpi()));
-    const auto next = gbrowser::webview::ComputePaneLayout(client.right + change,
+    auto next = gbrowser::webview::ComputePaneLayout(client.right + change,
         client.bottom, Dpi(), panel_percent_, panes_, arcarum_detached_, browser_layout_);
-    const auto placement = gbrowser::webview::PrimaryAnchoredResize(outer, change,
-        next.right.x - before.right.x, monitor.rcWork, UiPixels(browser_layout_ ? 600 : 400, Dpi()));
+    auto placement = gbrowser::webview::PrimaryAnchoredResize(outer, change,
+        next.right.x - before.right.x, ResizeWorkArea(outer, monitor.rcWork), UiPixels(browser_layout_ ? 600 : 400, Dpi()));
     if (!placement) {
       panes_ = previous;
-      Notice(L"左侧空间不足以固定主游戏位置；请先把窗口向右移动或调整大小"); return;
+      Notice(L"当前屏幕工作区宽度不足以容纳双窗；请先调整游戏或助手宽度"); return;
     }
+    if (!panes_.dual && single_window_) placement = *single_window_;
+    next = gbrowser::webview::ComputePaneLayout(client.right +
+        (placement->right - placement->left) - (outer.right - outer.left), client.bottom,
+        Dpi(), panel_percent_, panes_, arcarum_detached_, browser_layout_);
+    if (panes_.dual) single_window_ = outer;
     if (panes_.dual) {
+      const auto target = panes_;
+      panes_ = previous; // Selecting the permanent tab must still use single geometry.
       if (views_[active_].core) {
         const auto current = ComText([&](LPWSTR* text) { return views_[active_].core->get_Source(text); });
         if (IsGbfPageUrl(WideToUtf8(current)) && current.find(L"/#") != std::wstring::npos) {
@@ -1760,12 +1898,17 @@ class Host {
         }
       }
       SelectTab(0); // The verified permanent right ID continues to serve Tarou.
+      panes_ = target;
     }
-    if (!panes_.dual) CloseLeftGame();
-    SetWindowPos(window_, nullptr, placement->left, placement->top, placement->right - placement->left,
-        placement->bottom - placement->top, SWP_NOZORDER | SWP_NOACTIVATE);
-    Layout(); SaveLayout(); SavePanes();
-    EnsurePaneView(kLeftGame);
+    dual_previous_panes_ = previous;
+    dual_transition_.Begin({outer, *placement, before, next, panes_.dual});
+    KillTimer(window_, 4); // Persist only after the complete layout commit.
+    if (!panes_.dual) {
+      // Unload at the existing outer width; shrink only after Close returns.
+      ShowWindow(left_frame_, SW_HIDE); ShowWindow(buttons_[8], SW_HIDE);
+      CloseLeftGame(); single_window_.reset(); RefreshCooldown();
+    }
+    CommitDualLayout();
   }
   void ResizeTarouDock(const gbrowser::webview::PaneLayout& before, bool was_docked) {
     const bool docked = panes_.tarou && !panes_.tarou_detached;
@@ -1779,6 +1922,7 @@ class Host {
     ChangeWindowWidth(delta);
   }
   void SetTarou(bool visible) {
+    ChangeDualLayout();
     const auto before = PaneGeometry();
     const bool was_docked = panes_.tarou && !panes_.tarou_detached;
     if (!visible) {
@@ -1788,7 +1932,7 @@ class Host {
     if (!visible && tarou_window_) {
       SaveTarouPlacement();
       views_[1].Visible(FALSE);
-      Check(views_[1].controller->put_ParentWindow(window_));
+      views_[1].Reparent(tarou_frame_);
       for (const auto control : {tarou_title_, buttons_[10], buttons_[11]}) SetParent(control, window_);
       DestroyTarouWindow(); // Visibility and the user's floating preference are independent.
     }
@@ -1817,7 +1961,7 @@ class Host {
         reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(window_, GWLP_HINSTANCE)), this);
     if (!tarou_window_) throw std::runtime_error("无法创建太郎独立窗口");
     views_[1].Visible(FALSE);
-    Check(views_[1].controller->put_ParentWindow(tarou_window_));
+    views_[1].Reparent(tarou_window_);
     for (const auto control : {tarou_title_, buttons_[10], buttons_[11]}) SetParent(control, tarou_window_);
     if (tarou_window_file_->bytes()) {
       const auto& saved = tarou_window_state_;
@@ -1841,13 +1985,14 @@ class Host {
   }
   void DetachTarou() {
     if (!panes_.tarou || !views_[1].controller) return;
+    ChangeDualLayout();
     const auto before = PaneGeometry();
     const bool was_docked = !panes_.tarou_detached;
     CancelSplit();
     if (panes_.tarou_detached) {
       SaveTarouPlacement();
       views_[1].Visible(FALSE);
-      Check(views_[1].controller->put_ParentWindow(window_));
+      views_[1].Reparent(tarou_frame_);
       for (const auto control : {tarou_title_, buttons_[10], buttons_[11]}) SetParent(control, window_);
       panes_.tarou_detached = false; DestroyTarouWindow();
     } else { panes_.tarou_detached = true; EnsureTarouWindow(); }
@@ -1874,6 +2019,7 @@ class Host {
     views_[1].Visible(panes_.tarou && !closing_ && !IsIconic(tarou_window_));
   }
   void SetArcarum(bool visible) {
+    ChangeDualLayout();
     const auto geometry = PaneGeometry();
     const int width = panes_.arcarum && !arcarum_detached_ ? geometry.arcarum.width :
         geometry.tarou.width > 0 ? static_cast<int>(static_cast<int64_t>(geometry.tarou.width) *
@@ -1895,6 +2041,7 @@ class Host {
   }
   void DetachArcarum() {
     if (!panes_.arcarum || !views_[kArcarumView].controller) return;
+    ChangeDualLayout();
     if (arcarum_detached_) {
       const auto geometry = PaneGeometry();
       views_[kArcarumView].Visible(FALSE);
@@ -1944,12 +2091,12 @@ class Host {
     if (FAILED(views_[index].core.As(&core))) return;
     const auto epoch = favicon_epochs_[index];
     // Coalesce icon changes to one request per slot. A reused slot never accepts
-    // an old page's result, and closing/profile switch drains its callback.
-    favicon_loading_[index] = true; ++pending_;
+    // an old page's result; closing/profile switch revokes its callback ticket.
+    favicon_loading_[index] = true; const auto callback = callbacks_.Track();
     const auto result = core->GetFavicon(COREWEBVIEW2_FAVICON_IMAGE_FORMAT_PNG,
         Callback<ICoreWebView2GetFaviconCompletedHandler>(
-            [this, index, generation, epoch](HRESULT error, IStream* stream) -> HRESULT {
-              --pending_; favicon_loading_[index] = false;
+            [this, callback, index, generation, epoch](HRESULT error, IStream* stream) -> HRESULT {
+              if (!callback.Complete()) return S_OK; favicon_loading_[index] = false;
               if (!closing_ && CurrentView(index, generation) && favicon_epochs_[index] == epoch &&
                   std::find(tab_order_.begin(), tab_order_.end(), index) != tab_order_.end()) {
                 try { theme_.SetTabIcon(index, SUCCEEDED(error) ? stream : nullptr); }
@@ -1960,7 +2107,7 @@ class Host {
                 RequestTabFavicon(index, view_generations_[index]);
               Drain(); return S_OK;
             }).Get());
-    if (FAILED(result)) { --pending_; favicon_loading_[index] = false; Drain(); }
+    if (FAILED(result)) { callback.Complete(); favicon_loading_[index] = false; Drain(); }
   }
   void RebuildTabs() {
     if (!tabs_) return;
@@ -1993,6 +2140,7 @@ class Host {
   }
   void SelectTab(size_t index, bool focus = true) {
     if (std::find(tab_order_.begin(), tab_order_.end(), index) == tab_order_.end()) return;
+    if (dual_transition_.active()) return;
     active_ = index; RebuildTabs(); UpdateAddress(); Layout();
     if (focus) FocusActive();
   }
@@ -2153,23 +2301,55 @@ class Host {
       SetWindowPos(control, nullptr, area.x, area.y, area.width, area.height,
           SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOCOPYBITS);
   }
+  static void ShowControl(HWND control, bool visible) {
+    if (((GetWindowLongPtrW(control, GWL_STYLE) & WS_VISIBLE) != 0) != visible)
+      ShowWindow(control, visible ? SW_SHOWNA : SW_HIDE);
+  }
+  void NotifyViewPositions() {
+    for (auto& view : views_) view.NotifyPosition();
+  }
+  static void PositionControls(std::vector<std::pair<HWND, Rect>>& positions) {
+    auto batch = BeginDeferWindowPos(static_cast<int>(positions.size()));
+    for (const auto& [control, area] : positions) {
+      if (!batch) break;
+      RECT previous{}; GetWindowRect(control, &previous);
+      MapWindowPoints(nullptr, GetParent(control), reinterpret_cast<POINT*>(&previous), 2);
+      if (previous.left == area.x && previous.top == area.y && previous.right - previous.left == area.width &&
+          previous.bottom - previous.top == area.height) continue;
+      batch = DeferWindowPos(batch, control, nullptr, area.x, area.y, area.width, area.height,
+          SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOCOPYBITS | SWP_NOREDRAW);
+    }
+    if (!batch || !EndDeferWindowPos(batch))
+      for (const auto& [control, area] : positions) PositionControl(control, area);
+    positions.clear();
+  }
   void InvalidateChrome() const {
     // Sequential child moves can expose an old sibling's background. Repaint
     // every native control after placement instead of trusting copied pixels
     // or waiting for hover. Do not invalidate the game/helper renderers.
     for (const auto button : buttons_) if (button) InvalidateRect(button, nullptr, FALSE);
-    for (const auto control : {tarou_title_, tabs_, address_})
+    for (const auto control : {tarou_title_, tabs_, address_, divider_, helper_divider_})
       if (control) InvalidateRect(control, nullptr, FALSE);
     if (window_) InvalidateRect(window_, nullptr, FALSE);
   }
+  void PaintChromeNow() const {
+    // Paint only host-owned chrome; never erase/invalidate renderer children.
+    for (const auto button : buttons_) if (button) UpdateWindow(button);
+    for (const auto control : {tarou_title_, tabs_, address_, divider_, helper_divider_, window_})
+      if (control) UpdateWindow(control);
+  }
   void Layout() {
-    if (!window_ || !address_) return;
+    if (!window_ || !address_ || closing_ || layout_applying_) return;
+    if (dual_transition_.active() && !dual_positioning_) return;
+    layout_applying_ = true;
+    struct Reset { bool& value; ~Reset() { value = false; } } reset{layout_applying_};
     RECT rect{}; GetClientRect(window_, &rect);
     const int width = rect.right, height = rect.bottom;
     const auto px = [&](int value) { return UiPixels(value, Dpi()); };
     const auto geometry = PaneGeometry();
     const auto& layout = geometry.chrome;
-    const auto move = PositionControl;
+    std::vector<std::pair<HWND, Rect>> positions;
+    const auto move = [&](HWND control, Rect area) { positions.emplace_back(control, area); };
     auto top = gbrowser::webview::ToolbarGeometry(width, Dpi(), tab_order_.size());
     if (browser_layout_) {
       const auto browser = gbrowser::webview::BrowserToolbarGeometry(width, Dpi(), tab_order_.size());
@@ -2178,12 +2358,11 @@ class Host {
       const std::array<size_t, 7> actions{2, 3, 1, 4, 6, 0, 7};
       for (size_t i = 0; i < actions.size(); ++i) move(buttons_[actions[i]], browser.functions[i]);
     }
-    move(buttons_[15], top.reload); ShowWindow(buttons_[15], SW_SHOWNA);
-    move(buttons_[16], top.add); ShowWindow(buttons_[16], SW_SHOWNA);
+    move(buttons_[15], top.reload); ShowControl(buttons_[15], true);
+    move(buttons_[16], top.add); ShowControl(buttons_[16], true);
     auto address = top.address;
     address.x += px(7); address.y += px(4); address.width -= px(14); address.height -= px(8);
     move(address_, address); move(tabs_, top.tabs); move(buttons_[5], top.copy);
-    InvalidateRect(tabs_, nullptr, FALSE);
     move(buttons_[0], top.profile); move(buttons_[12], top.minimize);
     move(buttons_[13], top.maximize); move(buttons_[14], top.close);
     const int rail_x = layout.content.rail.x + px(4), rail_top = layout.content.rail.y;
@@ -2194,43 +2373,47 @@ class Host {
       move(buttons_[7], {rail_x, height - gbrowser::webview::LeftChromeInset(Dpi()) - px(44), px(40), px(40)});
     }
     move(divider_, geometry.divider);
-    ShowWindow(divider_, geometry.divider.width ? SW_SHOWNA : SW_HIDE);
+    ShowControl(divider_, geometry.divider.width != 0);
     move(helper_divider_, geometry.helper_divider);
-    ShowWindow(helper_divider_, geometry.helper_divider.width ? SW_SHOWNA : SW_HIDE);
-    move(right_frame_, geometry.right); ShowWindow(right_frame_, SW_SHOWNA);
-    move(left_frame_, geometry.left); ShowWindow(left_frame_, panes_.dual ? SW_SHOWNA : SW_HIDE);
+    ShowControl(helper_divider_, geometry.helper_divider.width != 0);
+    move(right_frame_, geometry.right); ShowControl(right_frame_, true);
+    const bool secondary_visible = panes_.dual;
+    move(left_frame_, geometry.left); ShowControl(left_frame_, secondary_visible != 0);
     move(buttons_[8], {geometry.link.x, geometry.link.y + (std::max)(0, (geometry.link.height - px(40)) / 2),
         geometry.link.width, px(40)});
-    ShowWindow(buttons_[8], panes_.dual ? SW_SHOWNA : SW_HIDE);
+    ShowControl(buttons_[8], secondary_visible != 0);
+    auto panel = geometry.tarou;
+    const auto header = gbrowser::webview::HeaderGeometry(panel, Dpi());
+    if (!panes_.tarou_detached) {
+      move(tarou_title_, header.title); move(buttons_[10], header.close); move(buttons_[11], header.pin);
+      for (const auto control : {tarou_title_, buttons_[10], buttons_[11]}) ShowControl(control, panes_.tarou);
+    }
+    panel.y += px(40); panel.height = (std::max)(0, panel.height - px(40));
+    move(tarou_frame_, panel); ShowControl(tarou_frame_, panes_.tarou && !panes_.tarou_detached);
+    auto arcarum = geometry.arcarum;
+    move(buttons_[9], {arcarum.x + (std::max)(0, arcarum.width - px(64)), arcarum.y, px(60), px(28)});
+    arcarum.y += px(30); arcarum.height = (std::max)(0, arcarum.height - px(30));
+    move(arcarum_frame_, arcarum);
+    ShowControl(arcarum_frame_, panes_.arcarum && !arcarum_detached_);
+    ShowControl(buttons_[9], panes_.arcarum && !arcarum_detached_);
+    PositionControls(positions);
     SetWindowPos(buttons_[8], HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-    const auto bounds = [](Rect r) { return RECT{r.x, r.y, r.x + r.width, r.y + r.height}; };
     for (size_t index = 0; index < views_.size(); ++index) {
       if (index == 1 || index == 3 || index == kArcarumView || IsAuxiliary(index) || !views_[index].controller) continue;
       const int cropped = !panes_.moba_visible && gbrowser::webview::GameSurface(index) ? MobaPixels(index) : 0;
       const auto game = index == kLeftGame ? geometry.left : geometry.right;
-      const bool visible = index == active_ || (index == kLeftGame && panes_.dual);
+      const bool visible = index == active_ || (index == kLeftGame && secondary_visible);
       // Background tabs get their new bounds when selected, avoiding work for every hidden renderer during drag.
       if (visible || index == 2) views_[index].Bounds(index == 2 ? RECT{0, 0, px(800), px(600)} :
           gbrowser::webview::GameViewBounds(index == kLeftGame ?
               Rect{game.x, game.y, geometry.right.width, game.height} : game, cropped));
       views_[index].Visible(visible);
     }
-    auto panel = geometry.tarou;
     if (panes_.tarou_detached) { EnsureTarouWindow(); LayoutTarouWindow(); }
-    else {
-      LayoutTarouHeader(panel, Dpi());
-      if (views_[1].controller) {
-        panel.y += px(40); panel.height = (std::max)(0, panel.height - px(40));
-        views_[1].Bounds(bounds(panel));
-        views_[1].Visible(panes_.tarou);
-      }
+    else if (views_[1].controller) {
+      views_[1].Bounds({0, 0, panel.width, panel.height});
+      views_[1].Visible(panes_.tarou);
     }
-    auto arcarum = geometry.arcarum;
-    move(buttons_[9], {arcarum.x + (std::max)(0, arcarum.width - px(64)), arcarum.y, px(60), px(28)});
-    arcarum.y += px(30); arcarum.height = (std::max)(0, arcarum.height - px(30));
-    move(arcarum_frame_, arcarum);
-    ShowWindow(arcarum_frame_, panes_.arcarum && !arcarum_detached_ ? SW_SHOWNA : SW_HIDE);
-    ShowWindow(buttons_[9], panes_.arcarum && !arcarum_detached_ ? SW_SHOWNA : SW_HIDE);
     if (views_[kArcarumView].controller) {
       if (arcarum_detached_) LayoutArcarumWindow();
       else {
@@ -2238,7 +2421,7 @@ class Host {
         views_[kArcarumView].Visible(panes_.arcarum);
       }
     }
-    InvalidateChrome();
+    NotifyViewPositions(); InvalidateChrome();
   }
   unsigned Dpi() const { const auto value = GetDpiForWindow(window_); return value ? value : 96; }
   void SetGameWidth(int width) {
@@ -2252,6 +2435,10 @@ class Host {
   }
   int MinimumWindowWidth() const {
     const int minimum = UiPixels(browser_layout_ ? 600 : 400, Dpi());
+    if (dual_transition_.active()) {
+      const auto& plan = dual_transition_.plan();
+      return (std::min)(plan.from.right - plan.from.left, plan.to.right - plan.to.left);
+    }
     if (!panes_.game_width || !window_) return minimum;
     RECT client{}, outer{}; GetClientRect(window_, &client); GetWindowRect(window_, &outer);
     const auto geometry = PaneGeometry();
@@ -2404,6 +2591,7 @@ class Host {
       return;
     }
     if (id == kLayout1 || id == kLayout2) {
+      ChangeDualLayout();
       try { layout_choice_file_->Save(gbrowser::webview::EncodeBrowserLayout(id == kLayout2)); }
       catch (...) { Notice(L"布局未保存，请稍后重试；当前布局保持不变"); return; }
       CancelSplit(); browser_layout_ = id == kLayout2; UpdateFont();
@@ -2519,10 +2707,10 @@ class Host {
     if (id == kTarouDetach) { DetachTarou(); return; }
     if (id == kSecondaryMenu) {
       if (IsZoomed(window_)) { Notice(L"请先还原窗口，再调整副窗口侧栏宽度"); return; }
-      UpdateSecondaryMenu(!panes_.secondary_menu_hidden, MulDiv(panes_.secondary_menu_width,
-          static_cast<int>(Dpi()), static_cast<int>(panes_.secondary_menu_dpi))); return;
+      UpdateSecondaryMenu(!panes_.secondary_menu_hidden, MeasuredSecondaryWidth(kLeftGame)); return;
     }
     if (id == kMoba) {
+      ChangeDualLayout();
       const int inset = MobaPixels(active_);
       if (inset <= 0) { Notice(L"当前页面的Moba左栏尚未就绪；请在已加载的游戏页切换"); return; }
       const auto geometry = PaneGeometry();
@@ -2601,23 +2789,31 @@ class Host {
       Notice(L"下载窗口未切换，请稍后重试");
   }
   void Close() {
+    if (closing_) { Drain(); return; }
+    dual_transition_.Cancel();
+    timings_.Mark("normal-close-requested");
+    CancelSplit(); SaveLayout(true); SaveTarouPlacement(); SavePanes();
+    closing_ = true; cache_stopping_ = true; // Block reentrant Drain until setup completes.
+    callbacks_.Cancel(); // Renderer results are optional; do not wait for page JS.
+    ShowWindow(window_, SW_HIDE);
+    // Independent of the cache timer: keep observing the retained process
+    // handle even after the disk worker has completed or the exit event is late.
+    SetTimer(window_, kShutdownTimer, 50, nullptr);
     skill_enabled_ = false; skill_overlay_.reset();
     capture_server_.reset(); capture_.Clear();
     for (auto& observer : capture_observers_) observer.reset();
     KillTimer(window_, 9);
-    if (!closing_) timings_.Mark("normal-close-requested");
     if (profile_dialog_) profile_dialog_->Close();
-    CancelSplit();
-    if (!closing_) SaveLayout(true);
-    if (!closing_) SaveTarouPlacement();
-    if (!closing_) SavePanes();
-    closing_ = true; proxy_verified_ = false; ++cache_network_epoch_; ++cache_epoch_;
-    // Cancel unfinished static downloads so their GetContent callbacks can
-    // settle before Drain releases the WebView environment.
-    cache_stopping_ = true;
-    if (cache_captures_) for (size_t i = 0; i < views_.size(); ++i)
-      if (gbrowser::webview::GameSurface(i) && views_[i].core) views_[i].core->Stop();
-    cache_stopping_ = false;
+    proxy_verified_ = false; ++cache_network_epoch_; ++cache_epoch_;
+    for (auto& pair : cache_pending_) {
+      auto& held = pair.second;
+      if (!held.deferral) continue;
+      ComPtr<ICoreWebView2WebResourceResponse> denied;
+      if (environment_ && SUCCEEDED(environment_->CreateWebResourceResponse(nullptr, 403, L"Forbidden", L"", &denied)))
+        held.args->put_Response(denied.Get());
+      held.deferral->Complete(); held.deferral.Reset(); held.args.Reset();
+    }
+    if (resource_cache_) resource_cache_->Shutdown();
     if (arcarum_window_) ShowWindow(arcarum_window_, SW_HIDE);
     if (tarou_window_) ShowWindow(tarou_window_, SW_HIDE);
     if (proxy_) proxy_->Invalidate(3);
@@ -2629,22 +2825,30 @@ class Host {
     CloseLogin();
     for (size_t index = gbrowser::webview::TabSlots::kAuxFirst; index < views_.size(); ++index)
       Guard([&] { CloseAuxiliary(index, view_generations_[index]); });
+    cache_stopping_ = false;
     Drain();
   }
   void Drain() {
-    if (!closing_ || pending_ || cache_stopping_) return;
+    if (!closing_ || draining_ || cache_stopping_) return;
+    draining_ = true;
+    struct Reset { bool& value; ~Reset() { value = false; } } reset{draining_};
+    // Close first. Waiting for pending script/content results before Close can
+    // leave a hung renderer holding the whole application open forever.
+    // Creation callbacks still have mandatory tickets and close any late view.
+    for (auto& view : views_) {
+      auto controller = std::move(view.controller);
+      view.core.Reset();
+      if (controller) controller->Close();
+    }
+    for (auto& extension : extensions_) extension.Reset();
+    profile_.Reset();
+    if (pending_) return; // Only controller/environment creation and disk jobs.
     if (resource_cache_) {
       // Periodic pruning and hit acknowledgments run without UI request IDs.
       // Signal shutdown and keep pumping; never join during background disk IO.
       if (!resource_cache_->Shutdown()) return;
       resource_cache_.reset(); KillTimer(window_, 6);
     }
-    for (auto& view : views_) {
-      if (view.controller) view.controller->Close();
-      view.core.Reset(); view.controller.Reset();
-    }
-    for (auto& extension : extensions_) extension.Reset();
-    profile_.Reset();
     // Never release profile/source pins while our runtime process is still
     // alive. No terminate/kill fallback, no unrelated browser process handling.
     const bool process_signaled = browser_process_ && WaitForSingleObject(browser_process_, 0) == WAIT_OBJECT_0;
@@ -2652,6 +2856,8 @@ class Host {
        return;
     }
     environment_.Reset();
+    KillTimer(window_, kShutdownTimer);
+    timings_.Mark("normal-close-complete");
     DestroyArcarumWindow();
     DestroyTarouWindow();
     DestroyWindow(window_); window_ = nullptr;
@@ -2701,11 +2907,13 @@ class Host {
     UpdateFont(); Layout();
   }
   void QueueLayoutSave() {
-    if (layout_ready_ && !restoring_layout_ && !closing_ && !layout_failed_ && !split_.dragging() && !helper_split_.dragging())
+    if (layout_ready_ && !restoring_layout_ && !closing_ && !layout_failed_ && !dual_transition_.active() &&
+        !split_.dragging() && !helper_split_.dragging())
       if (!SetTimer(window_, 4, 350, nullptr)) { layout_failed_ = true; Notice(L"本次窗口布局无法自动保存，原设置保留"); }
   }
   void SaveLayout(bool report = false) noexcept {
-    if (!layout_ready_ || restoring_layout_ || !window_ || split_.dragging() || helper_split_.dragging()) return;
+    if (!layout_ready_ || restoring_layout_ || !window_ || dual_transition_.active() ||
+        split_.dragging() || helper_split_.dragging()) return;
     try {
       if (layout_failed_) throw std::runtime_error("上次布局保存失败");
       WINDOWPLACEMENT placement{}; placement.length = sizeof(placement);
@@ -2724,7 +2932,6 @@ class Host {
     }
   }
   void CancelSplit() noexcept {
-    pending_secondary_width_.reset();
     KillTimer(window_, 5); split_layout_pending_ = false;
     const bool dragging = split_.dragging() || helper_split_.dragging();
     if (split_.dragging()) { split_.Cancel(); panes_.game_width = drag_game_width_; panes_.game_dpi = drag_game_dpi_; }
@@ -2761,6 +2968,7 @@ class Host {
     if (message == WM_LBUTTONDOWN) {
       host->Guard([&] {
         if (host->closing_ || host->split_.dragging() || host->helper_split_.dragging()) return;
+        host->ChangeDualLayout();
         const auto geometry = host->PaneGeometry();
         const int count = host->panes_.dual ? 2 : 1;
         const int body = inner ? geometry.tarou.width + geometry.arcarum.width :
@@ -2792,18 +3000,13 @@ class Host {
     if (message == WM_LBUTTONUP && gesture.dragging()) {
       host->Guard([&] {
         apply(); gesture.Finish();
-        const auto pending_width = host->pending_secondary_width_;
-        host->pending_secondary_width_.reset();
         KillTimer(host->window_, 5); host->split_layout_pending_ = false;
         if (GetCapture() == window) ReleaseCapture();
         host->Layout(); host->SaveLayout(); host->SavePanes();
-        if (pending_width) {
-          host->UpdateSecondaryMenu(host->panes_.secondary_menu_hidden, *pending_width);
-        }
       }); return 0;
     }
     if (message == WM_LBUTTONDBLCLK) {
-      host->Guard([&] { host->CancelSplit();
+      host->Guard([&] { host->ChangeDualLayout(); host->CancelSplit();
         if (inner) host->panes_.tarou_share = 5000;
         else { const auto geometry = host->PaneGeometry();
           host->SetGameWidth((geometry.chrome.content.rail.x - gbrowser::webview::LeftChromeInset(host->Dpi()) - geometry.divider.width -
@@ -2901,18 +3104,10 @@ class Host {
       UINT_PTR subclass, DWORD_PTR reference) {
     auto host = reinterpret_cast<Host*>(reference);
     if (message == WM_NCDESTROY) RemoveWindowSubclass(window, FrameProcedure, subclass);
-    if (message == WM_WINDOWPOSCHANGED && !(reinterpret_cast<WINDOWPOS*>(lparam)->flags & SWP_NOMOVE)) {
-      host->Guard([&] {
-        for (size_t index = 0; index < host->views_.size(); ++index) {
-          const bool ordinary = index >= gbrowser::webview::TabSlots::kFirst && !IsAuxiliary(index);
-          const bool owned = (window == host->right_frame_ && (index == 0 || ordinary)) ||
-              (window == host->left_frame_ && index == kLeftGame) ||
-              (window == host->arcarum_frame_ && index == kArcarumView && !host->arcarum_detached_);
-          if (owned && host->views_[index].controller)
-            Check(host->views_[index].controller->NotifyParentWindowPositionChanged());
-        }
-      });
-    }
+    if (message == WM_WINDOWPOSCHANGED && !host->dual_positioning_ && !host->closing_ && !host->layout_applying_ &&
+        !(reinterpret_cast<WINDOWPOS*>(lparam)->flags & SWP_NOMOVE))
+      host->Guard([&] { host->NotifyViewPositions(); });
+
     return DefSubclassProc(window, message, wparam, lparam);
   }
   void PaintButton(const DRAWITEMSTRUCT& draw) const {
@@ -2964,8 +3159,11 @@ class Host {
     if (message == WM_CREATE) host->theme_.Window(window);
     if (main_frame && message == WM_WINDOWPOSCHANGED) {
       const auto flags = reinterpret_cast<WINDOWPOS*>(lparam)->flags;
-      if (!(flags & SWP_NOMOVE) || !(flags & SWP_NOSIZE)) host->InvalidateChrome();
-      host->Guard([&] { host->RefreshCooldown(); });
+      if (!host->dual_positioning_ && (!(flags & SWP_NOMOVE) || !(flags & SWP_NOSIZE))) {
+        host->Guard([&] { host->ChangeDualLayout(); });
+        host->InvalidateChrome();
+      }
+      if (!host->dual_positioning_) host->Guard([&] { host->RefreshCooldown(); });
       // Continue to DefWindowProc: it emits the normal WM_SIZE/WM_MOVE events.
     }
     if (message == WM_ERASEBKGND) {
@@ -3075,7 +3273,7 @@ class Host {
     if (message == kProxyMenuReady) {host->Guard([&]{host->ShowProxyMenu(static_cast<uint64_t>(wparam));});return 0;}
     if (message == kMeasureSecondaryMenu) {
       host->Guard([&] {
-        if (!host->closing_ && !host->failed_ && host->panes_.dual &&
+        if (!host->closing_ && !host->failed_ && host->dual_transition_.CanCreate(host->panes_.dual) &&
             !IsZoomed(window) && !IsIconic(window) && host->views_[kLeftGame].core)
           Check(host->views_[kLeftGame].core->ExecuteScript(Utf8ToWide(std::string(kGameUiScript) + "();").c_str(), nullptr));
       }); return 0;
@@ -3096,21 +3294,33 @@ class Host {
     }
     if (message == WM_DPICHANGED) {
       const auto bounds = reinterpret_cast<RECT*>(lparam);
+      if (main_frame) { host->Guard([&] { host->ReconcileDisplay(*bounds); }); return 0; }
       SetWindowPos(window, nullptr, bounds->left, bounds->top, bounds->right - bounds->left,
           bounds->bottom - bounds->top, SWP_NOZORDER | SWP_NOACTIVATE);
       host->Guard([&] { if (window == host->window_) { host->UpdateFont(); host->Layout(); }
                        else host->LayoutLogin(); }); return 0;
     }
+    if (main_frame && message == WM_DISPLAYCHANGE) {
+      host->Guard([&] { RECT bounds{}; GetWindowRect(window, &bounds); host->ReconcileDisplay(bounds); }); return 0;
+    }
+    if (main_frame && (message == WM_ENTERSIZEMOVE || (message == WM_SYSCOMMAND &&
+        ((wparam & 0xfff0) == SC_MAXIMIZE || (wparam & 0xfff0) == SC_MINIMIZE || (wparam & 0xfff0) == SC_RESTORE))))
+      host->Guard([&] { host->ChangeDualLayout(); });
     if (message == WM_SIZE) {
+      if (main_frame && host->dual_positioning_) return 0; // Explicit placement lays out once after SetWindowPos.
       host->Guard([&] {
-        host->CancelSplit(); host->Layout();
+        if (!host->dual_transition_.active()) host->CancelSplit();
+        host->Layout();
         if (wparam != SIZE_MINIMIZED) {
-          if (wparam == SIZE_RESTORED) PostMessageW(window, kMeasureSecondaryMenu, 0, 0);
+          if (wparam == SIZE_RESTORED && !host->dual_positioning_ && !host->dual_transition_.active())
+            PostMessageW(window, kMeasureSecondaryMenu, 0, 0);
           host->maximized_ = wparam == SIZE_MAXIMIZED;
           host->QueueLayoutSave();
         }
       }); return 0;
     }
+    if (main_frame && message == WM_MOVE && !host->dual_positioning_ && !host->closing_)
+      host->Guard([&] { host->NotifyViewPositions(); });
     if (message == WM_EXITSIZEMOVE) { host->SaveLayout(); return 0; }
     if (message == WM_CANCELMODE) { host->Guard([&] { host->CancelSplit(); }); }
     if (message == WM_NOTIFY && reinterpret_cast<NMHDR*>(lparam)->hwndFrom == host->tabs_tip_ &&
@@ -3142,6 +3352,7 @@ class Host {
     if (message == WM_ENABLE && wparam) host->Guard([&] { host->RefreshProfileTitle(); });
     if (message == WM_CLOSE) { host->Close(); return 0; }
     if (message == WM_TIMER) {
+      if (wparam == kShutdownTimer) host->Drain();
       if (wparam == 9) host->CaptureTick();
       if (wparam == 8) host->Guard([&] { host->ResumeLogin(); });
       if (wparam == 6) host->CompleteCacheJobs();
@@ -3168,6 +3379,8 @@ class Host {
     if (message == WM_DESTROY) { PostQuitMessage(host->failed_ && !host->return_profile_ ? 3 : 0); return 0; }
     return DefWindowProcW(window, message, wparam, lparam);
   }
+  gbrowser::webview::CallbackGate callbacks_, lifecycle_callbacks_;
+  bool draining_ = false, layout_applying_ = false;
   RunMode mode_;
   const wchar_t*& phase_;
   std::filesystem::path root_, payload_, data_, installation_state_;
@@ -3286,12 +3499,18 @@ class Host {
   gbrowser::webview::WindowState tarou_window_state_{0, 0, 600, 800, 96, 50, false};
   bool arcarum_detached_ = false;
   std::array<int, gbrowser::webview::TabSlots::kViewCount> moba_css_{};
-  std::optional<int> pending_secondary_width_;
+  std::array<int, gbrowser::webview::TabSlots::kViewCount> menu_css_{};
+  int last_secondary_menu_width_ = 0;
+  unsigned last_secondary_menu_dpi_ = 96;
+  gbrowser::webview::DualTransition dual_transition_;
+  gbrowser::webview::PaneState dual_previous_panes_;
+  std::optional<RECT> single_window_;
+  bool dual_positioning_ = false;
   std::array<bool, 2> pane_pending_{};
   std::pair<uint64_t, uint64_t> arcarum_pin_epoch_{UINT64_MAX, UINT64_MAX};
   uint64_t game_source_epoch_ = 0;
   std::wstring left_requested_source_;
-  HWND right_frame_ = nullptr, left_frame_ = nullptr, arcarum_frame_ = nullptr;
+  HWND right_frame_ = nullptr, left_frame_ = nullptr, arcarum_frame_ = nullptr, tarou_frame_ = nullptr;
   HWND arcarum_window_ = nullptr, arcarum_dock_button_ = nullptr, tarou_title_ = nullptr;
   HWND tarou_window_ = nullptr, helper_divider_ = nullptr;
   gbrowser::webview::UiTheme theme_;

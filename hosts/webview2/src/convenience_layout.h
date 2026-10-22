@@ -105,12 +105,20 @@ inline PaneLayout ComputePaneLayout(int width, int height, unsigned dpi, unsigne
   }
   return out;
 }
-// Dual resize anchors the primary pane's screen coordinate, including integer
-// split rounding. Reject insufficient work area instead of silently moving it.
+// Convert visible work-area limits to native outer-window limits. Windows can
+// keep invisible resize borders beyond the work area when a window is snapped.
+inline RECT OuterResizeWorkArea(RECT outer, RECT visible, RECT work) {
+  work.left -= (std::max)(0L, visible.left - outer.left);
+  work.right += (std::max)(0L, outer.right - visible.right);
+  return work;
+}
+// Prefer the primary's existing screen position. If the left edge cannot fit,
+// spend the remaining work area on the right instead. Height is never changed.
 inline std::optional<RECT> PrimaryAnchoredResize(RECT old, int delta, int primary_delta, RECT work, int minimum) {
-  int width = (std::max)(minimum, static_cast<int>(old.right - old.left) + delta);
-  int left = old.left - primary_delta;
-  if (left < work.left || left + width > work.right) return {};
+  const int width = (std::max)(minimum, static_cast<int>(old.right - old.left) + delta);
+  if (width > work.right - work.left) return {};
+  const int left = (std::clamp)(static_cast<int>(old.left) - primary_delta,
+      static_cast<int>(work.left), static_cast<int>(work.right) - width);
   return RECT{left, old.top, left + width, old.bottom};
 }
 // Navigation linking never includes ordinary tabs, assistants or login views.
