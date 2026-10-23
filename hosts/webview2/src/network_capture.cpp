@@ -3,7 +3,9 @@
 #include <WebView2.h>
 #include "capture_json.h"
 #include "gbf_policy.h"
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <deque>
 #include <map>
 #include <mutex>
@@ -64,71 +66,119 @@ JsonObject Metadata(const JsonObject& input) {
 }
 
 struct Session::State {
-  struct Record { uint64_t id; std::string json; };
+  struct Record { uint64_t id, observed_tick; std::string json; };
   std::mutex mutex;
   std::deque<Record> records;
+  std::function<uint64_t()> now;
   size_t capacity, limit, bytes = 0;
-  uint64_t serial = 0, next = 1, dropped = 0, truncated = 0, filtered = 0, started = 0, deadline = 0, monotonic_deadline = 0;
-  std::string id, status = "idle";
+  uint64_t serial = 0, next = 1, dropped = 0, expired = 0, evicted_through = 0;
+  uint64_t truncated = 0, filtered = 0, started = 0, deadline = 0, monotonic_deadline = 0, retention = 0;
+  std::string id, status = "idle", mode = "bounded";
   void Clear() {
-    records.clear(); bytes = 0; id.clear(); status = "cleared";
-    started = 0; deadline = 0; monotonic_deadline = 0; next = 1; dropped = 0; truncated = 0; filtered = 0;
+    records.clear(); bytes = 0; id.clear(); status = "cleared"; mode = "bounded"; retention = 0;
+    started = 0; deadline = 0; monotonic_deadline = 0; next = 1; dropped = 0; expired = 0; evicted_through = 0;
+    truncated = 0; filtered = 0;
   }
-  void Expire() { if (status == "active" && GetTickCount64() >= monotonic_deadline) status = "expired"; }
-  JsonObject Status() {
-    Expire(); JsonObject result;
-    Put(result, L"capture_id", id); Put(result, L"state", status);
+  void EvictFront() {
+    evicted_through = (std::max)(evicted_through, records.front().id);
+    bytes -= records.front().json.size() + 128; records.pop_front();
+  }
+  void Expire() {
+    if (status != "active") return;
+    const auto tick = now();
+    if (mode == "bounded") { if (tick >= monotonic_deadline) status = "expired"; return; }
+    // Page/CDP timestamps and wall-clock changes never control retention.
+    while (!records.empty() && tick >= records.front().observed_tick &&
+        tick - records.front().observed_tick >= retention * 1000) {
+      EvictFront(); ++expired;
+    }
+  }
+  JsonObject Status() const {
+    JsonObject result;
+    Put(result, L"capture_id", id); Put(result, L"state", status); Put(result, L"mode", mode);
+    Number(result, L"retention_seconds", static_cast<double>(retention));
     Number(result, L"started_at_ms", static_cast<double>(started)); Number(result, L"deadline_ms", static_cast<double>(deadline));
     Number(result, L"buffer_bytes", static_cast<double>(bytes)); Number(result, L"record_count", static_cast<double>(records.size()));
-    Number(result, L"dropped_records", static_cast<double>(dropped)); Number(result, L"truncated_records", static_cast<double>(truncated));
-    Number(result, L"filtered_requests", static_cast<double>(filtered));
+    Number(result, L"dropped_records", static_cast<double>(dropped)); Number(result, L"expired_records", static_cast<double>(expired));
+    Number(result, L"truncated_records", static_cast<double>(truncated)); Number(result, L"filtered_requests", static_cast<double>(filtered));
     Number(result, L"capacity_bytes", static_cast<double>(capacity)); Number(result, L"record_limit_bytes", static_cast<double>(limit));
     Number(result, L"next_cursor", static_cast<double>(next - 1));
     return result;
   }
 };
-Session::Session(size_t capacity, size_t record_limit) : state_(std::make_unique<State>()) {
+Session::Session(size_t capacity, size_t record_limit, std::function<uint64_t()> monotonic_clock)
+    : state_(std::make_unique<State>()) {
   if (capacity < 4096 || record_limit < 1024 || record_limit > capacity) throw std::invalid_argument("capture limits");
   state_->capacity = capacity; state_->limit = record_limit;
+  state_->now = monotonic_clock ? std::move(monotonic_clock) : [] { return GetTickCount64(); };
 }
 Session::~Session() = default;
 std::string Session::Call(const std::string& method, const std::string& arguments) {
   const auto args = Object(arguments);
+  const bool start = method == "gbf_capture_start", read = method == "gbf_capture_read";
+  if (!start && !read && method != "gbf_capture_status" && method != "gbf_capture_stop" && method != "gbf_capture_clear")
+    throw std::runtime_error("unknown_tool");
+  for (const auto& argument : args) {
+    const auto name = argument.Key();
+    if (!(start ? name == L"mode" || name == L"duration_seconds" || name == L"retention_seconds" :
+        name == L"capture_id" || (read && (name == L"cursor" || name == L"limit"))))
+      throw std::runtime_error("unknown_argument");
+  }
+  const auto integer = [&](const wchar_t* name, double fallback, double minimum, double maximum, const char* error) {
+    if (!args.HasKey(name)) return fallback;
+    const auto value = args.GetNamedValue(name);
+    if (value.ValueType() != JsonValueType::Number) throw std::runtime_error(error);
+    const auto number = value.GetNumber();
+    if (!std::isfinite(number) || number < minimum || number > maximum || std::trunc(number) != number)
+      throw std::runtime_error(error);
+    return number;
+  };
   std::lock_guard<std::mutex> lock(state_->mutex);
   auto& state = *state_; state.Expire();
-  if (method == "gbf_capture_start") {
+  if (start) {
+    if (args.HasKey(L"mode") && args.GetNamedValue(L"mode").ValueType() != JsonValueType::String)
+      throw std::runtime_error("mode_must_be_bounded_or_rolling");
+    const auto mode = Text(args, L"mode", "bounded");
+    if (mode != "bounded" && mode != "rolling") throw std::runtime_error("mode_must_be_bounded_or_rolling");
+    if (mode == "rolling" && args.HasKey(L"duration_seconds")) throw std::runtime_error("rolling_rejects_duration_seconds");
+    if (mode == "bounded" && args.HasKey(L"retention_seconds")) throw std::runtime_error("bounded_rejects_retention_seconds");
+    const auto duration = mode == "bounded" ? integer(L"duration_seconds", 120, 1, 600, "duration_must_be_integer_1_to_600") : 0;
+    const auto retention = mode == "rolling" ? integer(L"retention_seconds", 600, 600, 600, "retention_must_be_integer_600") : 0;
     if (state.status == "active") throw std::runtime_error("capture_already_active");
-    const auto duration = args.GetNamedNumber(L"duration_seconds", 120);
-    if (duration < 1 || duration > 600 || duration != static_cast<int>(duration)) throw std::runtime_error("duration_must_be_integer_1_to_600");
-    state.records.clear(); state.bytes = 0; state.next = 1; state.dropped = 0; state.truncated = 0; state.filtered = 0;
-    state.started = WallTime(); state.deadline = state.started + static_cast<uint64_t>(duration * 1000);
-    state.monotonic_deadline = GetTickCount64() + static_cast<uint64_t>(duration * 1000);
+    state.Clear(); state.mode = mode; state.retention = static_cast<uint64_t>(retention);
+    state.started = WallTime();
+    if (mode == "bounded") {
+      state.deadline = state.started + static_cast<uint64_t>(duration * 1000);
+      state.monotonic_deadline = state.now() + static_cast<uint64_t>(duration * 1000);
+    }
     state.id = std::to_string(GetCurrentProcessId()) + "-" + std::to_string(state.started) + "-" + std::to_string(++state.serial);
     state.status = "active";
     auto result = state.Status(); Put(result, L"observer_state", "arming; wait for observer_ready records before triggering actions");
     return Encode(result);
   }
+  if (!args.HasKey(L"capture_id") || args.GetNamedValue(L"capture_id").ValueType() != JsonValueType::String)
+    throw std::runtime_error("capture_id_must_be_string");
   if (state.id.empty() || Text(args, L"capture_id") != state.id) throw std::runtime_error("unknown_capture_id");
   if (method == "gbf_capture_stop") { state.status = "stopped"; return Encode(state.Status()); }
-  if (method == "gbf_capture_clear") {
-    state.Clear();
-    return Encode(state.Status());
-  }
+  if (method == "gbf_capture_clear") { state.Clear(); return Encode(state.Status()); }
   if (method == "gbf_capture_status") return Encode(state.Status());
-  if (method != "gbf_capture_read") throw std::runtime_error("unknown_tool");
-  const auto cursor_value = args.GetNamedNumber(L"cursor", 0), limit_value = args.GetNamedNumber(L"limit", 100);
-  if (cursor_value < 0 || cursor_value > static_cast<double>(state.next - 1) || cursor_value != static_cast<uint64_t>(cursor_value) ||
-      limit_value < 1 || limit_value > 100 || limit_value != static_cast<int>(limit_value)) throw std::runtime_error("invalid_pagination");
+  const auto cursor_value = integer(L"cursor", 0, 0, static_cast<double>(state.next - 1), "invalid_pagination");
+  const auto limit_value = integer(L"limit", 100, 1, 100, "invalid_pagination");
   auto cursor = static_cast<uint64_t>(cursor_value);
-  auto result = state.Status(); JsonArray records; size_t bytes = 0;
-  Flag(result, L"cursor_gap", !state.records.empty() && cursor + 1 < state.records.front().id);
+  auto result = state.Status(); JsonArray records; size_t bytes = 0; bool has_more = false;
+  Flag(result, L"cursor_gap", cursor < state.evicted_through);
   for (const auto& record : state.records) {
     if (record.id <= cursor) continue;
-    if (records.Size() >= static_cast<uint32_t>(limit_value) || (records.Size() && bytes + record.json.size() > 4 * 1024 * 1024)) break;
+    if (records.Size() >= static_cast<uint32_t>(limit_value) || (records.Size() && bytes + record.json.size() > 4 * 1024 * 1024)) {
+      has_more = true; break;
+    }
     records.Append(Object(record.json)); bytes += record.json.size(); cursor = record.id;
   }
+  // Advance over an entirely evicted window or a discarded tail, rather than
+  // returning an empty page with has_more forever. New records keep increasing IDs.
+  if (!has_more) cursor = state.next - 1;
   result.SetNamedValue(L"records", records); Number(result, L"next_cursor", static_cast<double>(cursor));
-  Flag(result, L"has_more", cursor + 1 < state.next);
+  Flag(result, L"has_more", has_more);
   return Encode(result);
 }
 std::string Session::Active() {
@@ -136,19 +186,26 @@ std::string Session::Active() {
 }
 std::wstring Session::Label() {
   std::lock_guard<std::mutex> lock(state_->mutex); state_->Expire();
-  if (state_->status == "active") return L" · 网络采集中（菜单可停止）";
+  if (state_->status == "active") return state_->mode == "rolling" ?
+      L" · 网络持续采集中（保留最近10分钟，菜单可停止）" : L" · 网络采集中（菜单可停止）";
   if (state_->status == "idle") return L"";
   return state_->status == "cleared" ? L" · 抓取已清除" : L" · 抓取已停止";
 }
-void Session::Stop() { std::lock_guard<std::mutex> lock(state_->mutex); if (state_->status == "active") state_->status = "stopped"; }
+void Session::Tick() { std::lock_guard<std::mutex> lock(state_->mutex); state_->Expire(); }
+void Session::Stop() {
+  std::lock_guard<std::mutex> lock(state_->mutex); state_->Expire();
+  if (state_->status == "active") state_->status = "stopped";
+}
 void Session::Clear() {
   std::lock_guard<std::mutex> lock(state_->mutex); state_->Clear();
 }
 void Session::Loss(const std::string& capture_id) {
-  std::lock_guard<std::mutex> lock(state_->mutex); if (state_->id == capture_id && state_->status == "active") ++state_->dropped;
+  std::lock_guard<std::mutex> lock(state_->mutex); state_->Expire();
+  if (state_->id == capture_id && state_->status == "active") ++state_->dropped;
 }
 void Session::Filtered(const std::string& capture_id) {
-  std::lock_guard<std::mutex> lock(state_->mutex); if (state_->id == capture_id && state_->status == "active") ++state_->filtered;
+  std::lock_guard<std::mutex> lock(state_->mutex); state_->Expire();
+  if (state_->id == capture_id && state_->status == "active") ++state_->filtered;
 }
 void Session::Add(const std::string& capture_id, size_t view, const std::string& request_id,
     const std::string& kind, const std::string& json) {
@@ -169,11 +226,11 @@ void Session::Add(const std::string& capture_id, size_t view, const std::string&
     encoded = Encode(record);
   } else if (encoded.find("\"truncated\":true") != std::string::npos) ++state.truncated;
   const auto cost = encoded.size() + 128;
-  while (!state.records.empty() && state.bytes + cost > state.capacity) {
-    state.bytes -= state.records.front().json.size() + 128; state.records.pop_front(); ++state.dropped;
+  if (cost > state.capacity || cost > state.limit) {
+    state.evicted_through = state.next - 1; ++state.dropped; return;
   }
-  if (cost > state.capacity || cost > state.limit) { ++state.dropped; return; }
-  state.bytes += cost; state.records.push_back({state.next - 1, std::move(encoded)});
+  while (!state.records.empty() && state.bytes + cost > state.capacity) { state.EvictFront(); ++state.dropped; }
+  state.bytes += cost; state.records.push_back({state.next - 1, state.now(), std::move(encoded)});
 }
 
 struct Observer::State : std::enable_shared_from_this<Observer::State> {
@@ -240,7 +297,7 @@ struct Observer::State : std::enable_shared_from_this<Observer::State> {
     const auto epoch = network_epoch; JsonObject options;
     Number(options, L"maxTotalBufferSize", 2 * 1024 * 1024); Number(options, L"maxResourceBufferSize", 1024 * 1024); Number(options, L"maxPostDataSize", 1024 * 1024);
     Method(target, L"Network.enable", options, [self = shared_from_this(), epoch, target](HRESULT error, const JsonObject&) {
-      if (epoch != self->network_epoch || !self->eligible()) return;
+      if (epoch != self->network_epoch || !self->eligible() || (!target.empty() && !self->targets.count(target))) return;
       if (target.empty()) self->network_ready = SUCCEEDED(error);
       JsonObject record; Put(record, L"target_session", target); Put(record, L"state", FAILED(error) ? "unavailable" : "ready");
       if (FAILED(error)) Put(record, L"reason", "Network.enable_failed");
@@ -273,6 +330,8 @@ struct Observer::State : std::enable_shared_from_this<Observer::State> {
     if (epoch != network_epoch) return;
     auto& count = skill ? skill_pending : body_pending;
     if (count) --count;
+    const auto delimiter = key.find(':');
+    if (delimiter != std::string::npos && delimiter != 0 && !targets.count(key.substr(0, delimiter))) return;
     const bool available = SUCCEEDED(error) && body.HasKey(L"body");
     if (skill) {
       if (!available || body.GetNamedBoolean(L"base64Encoded", false)) Deliver(request, cooldown::Snapshot{});
@@ -297,7 +356,20 @@ struct Observer::State : std::enable_shared_from_this<Observer::State> {
       if (targets.size() >= 32) { session.Loss(capture_id); return; }
       targets.insert(attached); Enable(attached); return;
     }
-    if (name == "Target.detachedFromTarget") { targets.erase(Text(args, L"sessionId")); return; }
+    if (name == "Target.detachedFromTarget") {
+      const auto detached = Text(args, L"sessionId");
+      if (detached.empty() || !targets.erase(detached)) return;
+      const auto prefix = detached + ":";
+      for (auto entry = pending.begin(); entry != pending.end();) {
+        if (entry->first.rfind(prefix, 0) == 0) entry = pending.erase(entry); else ++entry;
+      }
+      // Safe only after detach: the target guard rejects all late events. Never
+      // age out excluded sources on an attached target into unknown-context capture.
+      for (auto entry = excluded.begin(); entry != excluded.end();) {
+        if (entry->rfind(prefix, 0) == 0) entry = excluded.erase(entry); else ++entry;
+      }
+      return;
+    }
     const auto raw_id = Text(args, L"requestId");
     if (raw_id.empty() || raw_id.size() > 256 || target.size() > 256) return;
     const auto key = target + ":" + raw_id;
@@ -463,6 +535,59 @@ void Observer::Listen(bool enabled, std::function<void(const cooldown::Snapshot&
 }
 void Observer::ResetCooldown() { state_->ResetCooldown(); }
 void CheckObserverEvents() {
+  {
+    uint64_t tick = 0;
+    Session idle(8192, 2048, [&] { return tick; });
+    const auto id = Text(Object(idle.Call("gbf_capture_start", R"({"mode":"rolling"})")), L"capture_id");
+    idle.Add(id, 0, "idle", "request", "{}");
+    tick = 599999; idle.Tick();
+    if (idle.state_->records.size() != 1) throw std::runtime_error("idle sweep expired too early");
+    tick = 600000; idle.Tick(); // No observer, status/read RPC or incoming event drives this cleanup.
+    if (!idle.state_->records.empty() || idle.state_->bytes != 0 || idle.state_->expired != 1 || idle.state_->status != "active")
+      throw std::runtime_error("idle rolling sweep failed");
+    idle.Add(id, 0, "old-at-stop", "request", "{}");
+    tick += 300000; idle.Add(id, 0, "live-at-stop", "request", "{}");
+    tick += 300000; idle.Stop();
+    if (idle.state_->records.size() != 1 || idle.state_->expired != 2) throw std::runtime_error("native stop skipped final sweep");
+    tick += 86400000; idle.Tick();
+    if (idle.state_->records.size() != 1 || idle.state_->expired != 2 || idle.state_->status != "stopped")
+      throw std::runtime_error("native stop did not freeze snapshot");
+    idle.Clear();
+    if (idle.state_->expired || idle.state_->evicted_through || idle.state_->retention || idle.state_->mode != "bounded")
+      throw std::runtime_error("native clear retained rolling state");
+  }
+  {
+    Session buffer;
+    const auto id = Text(Object(buffer.Call("gbf_capture_start", R"({"mode":"rolling"})")), L"capture_id");
+    auto live = std::make_shared<Observer::State>(nullptr, buffer, 0, [] { return true; });
+    live->capture_id = id; live->targets = {"child", "child-long"};
+    live->pending["child:request"] = {}; live->pending["child-long:request"] = {}; live->pending[":root"] = {};
+    live->excluded = {"child:excluded", "child-long:excluded", ":root-excluded"};
+    live->Event("Target.detachedFromTarget", "", Object(R"({"sessionId":""})"));
+    live->Event("Target.detachedFromTarget", "", Object(R"({"sessionId":"unknown"})"));
+    if (live->pending.size() != 3 || live->excluded.size() != 3) throw std::runtime_error("invalid detach removed live sources");
+    live->Event("Target.detachedFromTarget", "", Object(R"({"sessionId":"child"})"));
+    if (live->targets.count("child") || live->pending.size() != 2 || live->excluded.size() != 2 ||
+        live->pending.count("child:request") || live->excluded.count("child:excluded") || !live->targets.count("child-long"))
+      throw std::runtime_error("target detach failed to release only its associations");
+    const auto before = buffer.state_->next;
+    live->Event("Network.responseReceived", "child", Object(R"({"requestId":"excluded","response":{"status":200}})"));
+    live->Event("Network.webSocketFrameReceived", "child", Object(R"({"requestId":"excluded","response":{"opcode":1,"payloadData":"{}"}})"));
+    Observer::State::Pending request;
+    request.epoch = live->cooldown_state.epoch(); request.sequence = 1;
+    live->listening = true; live->body_pending = live->skill_pending = 1;
+    unsigned deliveries = 0; live->cooldown_changed = [&](const cooldown::Snapshot&) { ++deliveries; };
+    const auto body = Object(R"({"body":"{\"ability\":{}}"})");
+    live->CompleteBody(live->network_epoch, id, "child:request", request, false, S_OK, body);
+    live->CompleteBody(live->network_epoch, id, "child:request", request, true, S_OK, body);
+    if (buffer.state_->next != before || live->body_pending || live->skill_pending || deliveries ||
+        live->pending.size() != 2 || live->excluded.size() != 2)
+      throw std::runtime_error("detached target late event/body bypassed source guard");
+    // Attached exclusions survive arbitrarily long captures; only terminal events/detach may release them.
+    live->Event("Network.responseReceived", "child-long", Object(R"({"requestId":"excluded","response":{"status":200}})"));
+    if (buffer.state_->next != before || !live->excluded.count("child-long:excluded"))
+      throw std::runtime_error("attached excluded source was exposed");
+  }
   Session session; bool eligible = true;
   const auto id = Text(Object(session.Call("gbf_capture_start", "{}")), L"capture_id");
   auto observer = std::make_shared<Observer::State>(nullptr, session, 0, [&eligible] { return eligible; });
@@ -579,12 +704,13 @@ void CheckObserverEvents() {
   const auto cleared = session.state_->Status();
   if (!Text(cleared, L"capture_id").empty() || Text(cleared, L"state") != "cleared" || session.state_->monotonic_deadline != 0)
     throw std::runtime_error("capture native clear retained identity");
-  for (const auto* field : {L"started_at_ms", L"deadline_ms", L"buffer_bytes", L"record_count", L"dropped_records", L"truncated_records", L"filtered_requests", L"next_cursor"})
+  for (const auto* field : {L"started_at_ms", L"deadline_ms", L"retention_seconds", L"expired_records", L"buffer_bytes", L"record_count", L"dropped_records", L"truncated_records", L"filtered_requests", L"next_cursor"})
     if (cleared.GetNamedNumber(field) != 0) throw std::runtime_error("capture native clear retained state");
   const auto another = Text(Object(session.Call("gbf_capture_start", "{}")), L"capture_id");
   if (session.Call("gbf_capture_clear", "{\"capture_id\":\"" + another + "\"}") != Encode(cleared)) throw std::runtime_error("capture clear paths diverged");
   {
-    Session buffer;
+    uint64_t tick = 0;
+    Session buffer(8192, 2048, [&] { return tick; });
     bool game = true;
     auto live = std::make_shared<Observer::State>(nullptr, buffer, 4, [&] { return game; });
     live->listening = live->network = true;
@@ -598,8 +724,16 @@ void CheckObserverEvents() {
     Put(body, L"body", R"({"status":{"ability":{"4":{"pos":3,"list":{"3":[{"ability-recast":8}]}}}}})");
     live->CompleteBody(live->network_epoch, "", ":skill", ticket, true, S_OK, body);
     if (shown.cells[3][2] != 8 || buffer.state_->bytes != 0) throw std::runtime_error("CD-only listener failed or retained capture records");
-    const auto capture = Text(Object(buffer.Call("gbf_capture_start", "{}")), L"capture_id");
+    const auto capture = Text(Object(buffer.Call("gbf_capture_start", R"({"mode":"rolling"})")), L"capture_id");
     live->capture_id = capture;
+    live->Event("Network.requestWillBeSent", "", request);
+    const auto epoch = live->network_epoch;
+    tick = 86400000; buffer.Tick(); live->Tick();
+    if (live->capture_id != capture || live->network_epoch != epoch || !live->network || !buffer.state_->records.empty())
+      throw std::runtime_error("rolling window reset the continuous observer");
+    live->Event("Network.responseReceived", "", Object(R"({"requestId":"skill","response":{"status":200,"mimeType":"application/json"}})"));
+    if (buffer.state_->records.size() != 1 || live->pending.count(":skill") != 1)
+      throw std::runtime_error("rolling eviction broke in-flight request correlation");
     buffer.Stop(); live->Tick();
     if (!live->network || !live->capture_id.empty()) throw std::runtime_error("MCP stop disabled continuous CD");
     buffer.Clear(); live->Tick();

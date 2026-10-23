@@ -1,5 +1,6 @@
 #pragma once
 #include <windows.h>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
@@ -9,11 +10,14 @@ struct ICoreWebView2;
 namespace gbrowser::webview::capture {
 class Session {
  public:
-  explicit Session(size_t capacity = 128 * 1024 * 1024, size_t record_limit = 2 * 1024 * 1024);
+  // The optional millisecond clock is monotonic; injection is for deterministic checks only.
+  explicit Session(size_t capacity = 128 * 1024 * 1024, size_t record_limit = 2 * 1024 * 1024,
+      std::function<uint64_t()> monotonic_clock = {});
   ~Session();
   std::string Call(const std::string& method, const std::string& arguments);
   std::string Active();
   std::wstring Label();
+  void Tick();
   void Stop();
   void Clear();
   void Add(const std::string& capture_id, size_t view, const std::string& request_id,

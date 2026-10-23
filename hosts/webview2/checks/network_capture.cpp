@@ -6,6 +6,11 @@
 namespace gbrowser::webview::capture {
 namespace {
 void Require(bool value, const char* message) { if (!value) throw std::runtime_error(message); }
+std::string Identity(const std::string& id) { JsonObject args; Put(args, L"capture_id", id); return Encode(args); }
+bool Rejects(Session& session, const std::string& method, const std::string& args) {
+  try { session.Call(method, args); } catch (...) { return true; }
+  return false;
+}
 std::string Arguments(const std::string& id, uint64_t cursor = 0) {
   JsonObject args; Put(args, L"capture_id", id); Number(args, L"cursor", static_cast<double>(cursor)); Number(args, L"limit", 1); return Encode(args);
 }
@@ -107,7 +112,8 @@ void RunCaptureChecks() {
     Require(Encode(headers).find("hidden") == std::string::npos, "capture authentication headers leaked");
   }
   {
-    Session session(8192, 2048);
+    uint64_t tick = 1000;
+    Session session(8192, 2048, [&] { return tick; });
     const auto start = Object(session.Call("gbf_capture_start", "{}")); const auto id = Text(start, L"capture_id");
     Require(start.GetNamedNumber(L"deadline_ms") - start.GetNamedNumber(L"started_at_ms") == 120000, "default capture duration changed");
     bool rejected = false; try { session.Call("gbf_capture_start", "{}"); } catch (...) { rejected = true; }
@@ -120,28 +126,153 @@ void RunCaptureChecks() {
     Require(Text(read.GetNamedArray(L"records").GetObjectAt(0), L"request_id") == "request-1", "capture association lost");
     const auto count = read.GetNamedNumber(L"record_count");
     session.Stop(); session.Add(id, 0, "ignored", "request", "{}");
-    Require(Object(session.Call("gbf_capture_status", Arguments(id))).GetNamedNumber(L"record_count") == count, "stopped capture still recorded");
+    Require(Object(session.Call("gbf_capture_status", Identity(id))).GetNamedNumber(L"record_count") == count, "stopped capture still recorded");
     for (const char* duration : {"0", "601", "1.5"}) {
       rejected = false; try { session.Call("gbf_capture_start", std::string("{\"duration_seconds\":") + duration + "}"); } catch (...) { rejected = true; }
       Require(rejected, "invalid capture duration accepted");
     }
     const auto next = Text(Object(session.Call("gbf_capture_start", "{\"duration_seconds\":600}")), L"capture_id");
     for (int index = 0; index < 50; ++index) { JsonObject item; Put(item, L"padding", std::string(500, 'x')); session.Add(next, 4, "bulk", "request", Encode(item)); }
-    auto status = Object(session.Call("gbf_capture_status", Arguments(next)));
+    auto status = Object(session.Call("gbf_capture_status", Identity(next)));
     Require(status.GetNamedNumber(L"dropped_records") > 0 && status.GetNamedNumber(L"buffer_bytes") <= 8192, "capture memory limit failed");
     Require(Object(session.Call("gbf_capture_read", Arguments(next))).GetNamedBoolean(L"cursor_gap"), "capture loss was silent");
     JsonObject large; Put(large, L"padding", std::string(4000, 'x')); session.Add(next, 4, "large", "response", Encode(large));
-    Require(Object(session.Call("gbf_capture_status", Arguments(next))).GetNamedNumber(L"truncated_records") == 1, "record limit not reported");
-    session.Call("gbf_capture_clear", Arguments(next)); Require(session.Active().empty(), "capture clear remained active");
+    Require(Object(session.Call("gbf_capture_status", Identity(next))).GetNamedNumber(L"truncated_records") == 1, "record limit not reported");
+    session.Call("gbf_capture_clear", Identity(next)); Require(session.Active().empty(), "capture clear remained active");
     rejected = false; try { session.Call("gbf_capture_read", Arguments(next)); } catch (...) { rejected = true; }
     Require(rejected, "cleared records readable");
     const auto timed = Text(Object(session.Call("gbf_capture_start", "{\"duration_seconds\":1}")), L"capture_id");
-    Sleep(1100); Require(session.Active().empty(), "capture did not expire");
-    Require(Text(Object(session.Call("gbf_capture_status", Arguments(timed))), L"state") == "expired", "expiry state missing");
+    tick += 1000; Require(session.Active().empty(), "capture did not expire at the monotonic deadline");
+    Require(Text(Object(session.Call("gbf_capture_status", Identity(timed))), L"state") == "expired", "expiry state missing");
+  }
+  {
+    uint64_t tick = 0;
+    Session session(8192, 2048, [&] { return tick; });
+    auto start = Object(session.Call("gbf_capture_start", "{}"));
+    auto id = Text(start, L"capture_id");
+    session.Add(id, 0, "snapshot", "request", "{}"); session.Stop();
+    const auto snapshot = session.Call("gbf_capture_status", Identity(id));
+    for (const auto* invalid : {R"({"mode":null})", R"({"mode":false})", R"({"mode":1})", R"({"mode":{}})",
+        R"({"mode":[]})", R"({"mode":"ROLLING"})", R"({"mode":""})", R"({"unknown":1})",
+        R"({"duration_seconds":null})", R"({"duration_seconds":true})", R"({"duration_seconds":"120"})",
+        R"({"duration_seconds":{}})", R"({"duration_seconds":[]})", R"({"duration_seconds":1e100})",
+        R"({"retention_seconds":600})", R"({"mode":"bounded","retention_seconds":600})",
+        R"({"mode":"rolling","duration_seconds":600})", R"({"mode":"rolling","duration_seconds":null})",
+        R"({"mode":"rolling","retention_seconds":600,"duration_seconds":1})",
+        R"({"mode":"rolling","retention_seconds":null})", R"({"mode":"rolling","retention_seconds":true})",
+        R"({"mode":"rolling","retention_seconds":"600"})", R"({"mode":"rolling","retention_seconds":[]})",
+        R"({"mode":"rolling","retention_seconds":{}})", R"({"mode":"rolling","retention_seconds":599})",
+        R"({"mode":"rolling","retention_seconds":601})", R"({"mode":"rolling","retention_seconds":600.5})",
+        R"({"mode":"rolling","retention_seconds":1e100})", R"({"mode":"rolling","extra":true})"}) {
+      Require(Rejects(session, "gbf_capture_start", invalid), "invalid capture start accepted");
+      Require(session.Call("gbf_capture_status", Identity(id)) == snapshot, "invalid start replaced the stopped snapshot");
+    }
+    for (const auto* field : {L"cursor", L"limit"}) for (const auto* invalid : {"null", "true", R"("1")", "[]", "{}", "-1", "0.5", "1e100"}) {
+      auto args = Object(Identity(id)); args.SetNamedValue(field, JsonValue::Parse(winrt::to_hstring(invalid)));
+      Require(Rejects(session, "gbf_capture_read", Encode(args)), "invalid pagination type/range accepted");
+    }
+    Require(Rejects(session, "gbf_capture_status", Arguments(id)) &&
+        Rejects(session, "gbf_capture_stop", R"({"capture_id":null})") &&
+        Rejects(session, "gbf_capture_clear", "{}"), "invalid identity/unknown fields accepted");
+    start = Object(session.Call("gbf_capture_start", R"({"mode":"bounded","duration_seconds":600})"));
+    id = Text(start, L"capture_id");
+    Require(Text(start, L"mode") == "bounded" && start.GetNamedNumber(L"retention_seconds") == 0 &&
+        start.GetNamedNumber(L"expired_records") == 0 && start.GetNamedNumber(L"deadline_ms") - start.GetNamedNumber(L"started_at_ms") == 600000,
+        "explicit bounded contract changed");
+    session.Add(id, 0, "bounded", "request", "{}"); tick = 600000; session.Tick();
+    auto state = Object(session.Call("gbf_capture_status", Identity(id)));
+    Require(Text(state, L"state") == "expired" && state.GetNamedNumber(L"record_count") == 1 &&
+        state.GetNamedNumber(L"expired_records") == 0, "bounded expiry removed its snapshot");
+    tick += 86400000; session.Tick();
+    Require(session.Call("gbf_capture_status", Identity(id)) == Encode(state), "bounded snapshot acquired rolling TTL");
+  }
+  {
+    uint64_t tick = 1000;
+    Session session(8192, 2048, [&] { return tick; });
+    const auto start = Object(session.Call("gbf_capture_start", R"({"mode":"rolling","retention_seconds":600})"));
+    const auto id = Text(start, L"capture_id");
+    Require(Text(start, L"mode") == "rolling" && Text(start, L"state") == "active" &&
+        start.GetNamedNumber(L"retention_seconds") == 600 && start.GetNamedNumber(L"deadline_ms") == 0 &&
+        session.Label().find(L"持续") != std::wstring::npos, "rolling contract/label missing");
+    Require(Rejects(session, "gbf_capture_start", R"({"mode":"rolling"})"), "parallel rolling capture allowed");
+    session.Add(id, 0, "old", "request", R"({"timestamp":1e20,"wallTime":1e20,"observed_at_ms":1e20})");
+    tick += 300000; session.Add(id, 0, "recent", "response", R"({"timestamp":-1e20,"wallTime":-1e20})");
+    tick = 600999;
+    Require(Object(session.Call("gbf_capture_status", Identity(id))).GetNamedNumber(L"record_count") == 2, "rolling record expired early");
+    tick = 601000; session.Tick();
+    auto page = Object(session.Call("gbf_capture_read", Arguments(id)));
+    Require(session.Active() == id && page.GetNamedNumber(L"expired_records") == 1 && page.GetNamedNumber(L"dropped_records") == 0 &&
+        page.GetNamedNumber(L"record_count") == 1 && page.GetNamedBoolean(L"cursor_gap") && !page.GetNamedBoolean(L"has_more") &&
+        page.GetNamedNumber(L"next_cursor") == 2 && Text(page.GetNamedArray(L"records").GetObjectAt(0), L"request_id") == "recent",
+        "rolling exact boundary/partial eviction failed");
+    Require(!Object(session.Call("gbf_capture_read", Arguments(id, 1))).GetNamedBoolean(L"cursor_gap"), "caught-up cursor reported old loss");
+    tick = 901000;
+    page = Object(session.Call("gbf_capture_read", Arguments(id)));
+    Require(page.GetNamedNumber(L"expired_records") == 2 && page.GetNamedNumber(L"buffer_bytes") == 0 &&
+        page.GetNamedArray(L"records").Size() == 0 && page.GetNamedBoolean(L"cursor_gap") &&
+        page.GetNamedNumber(L"next_cursor") == 2 && !page.GetNamedBoolean(L"has_more"), "empty rolling window stranded cursor");
+    page = Object(session.Call("gbf_capture_read", Arguments(id, 2)));
+    Require(!page.GetNamedBoolean(L"cursor_gap") && !page.GetNamedBoolean(L"has_more"), "empty current cursor did not settle");
+    tick += 86400000; session.Tick(); session.Add(id, 4, "after-a-day", "request", "{}");
+    page = Object(session.Call("gbf_capture_read", Arguments(id, 2)));
+    Require(session.Active() == id && page.GetNamedArray(L"records").Size() == 1 &&
+        page.GetNamedNumber(L"next_cursor") == 3 && !page.GetNamedBoolean(L"cursor_gap"), "rolling stopped or restarted at ten minutes");
+    tick += 599999;
+    const auto stopped = session.Call("gbf_capture_stop", Identity(id));
+    tick += 86400000; session.Tick(); session.Add(id, 0, "late", "request", "{}"); session.Loss(id); session.Filtered(id);
+    Require(session.Call("gbf_capture_status", Identity(id)) == stopped && session.Active().empty() &&
+        session.Call("gbf_capture_stop", Identity(id)) == stopped, "stop failed to freeze rolling snapshot");
+    const auto restarted = Object(session.Call("gbf_capture_start", R"({"mode":"rolling"})"));
+    const auto next_id = Text(restarted, L"capture_id");
+    Require(next_id != id && restarted.GetNamedNumber(L"retention_seconds") == 600 &&
+        restarted.GetNamedNumber(L"expired_records") == 0 && restarted.GetNamedNumber(L"record_count") == 0 &&
+        restarted.GetNamedNumber(L"next_cursor") == 0, "rolling restart failed to reset state");
+    session.Add(id, 0, "stale-generation", "request", "{}"); session.Loss(id); session.Filtered(id);
+    const auto current = Object(session.Call("gbf_capture_status", Identity(next_id)));
+    Require(current.GetNamedNumber(L"record_count") == 0 && current.GetNamedNumber(L"dropped_records") == 0 &&
+        current.GetNamedNumber(L"filtered_requests") == 0, "old generation modified rolling session");
+    session.Add(next_id, 0, "expires-on-stop", "request", "{}"); tick += 600000;
+    const auto empty_stop = Object(session.Call("gbf_capture_stop", Identity(next_id)));
+    Require(empty_stop.GetNamedNumber(L"record_count") == 0 && empty_stop.GetNamedNumber(L"expired_records") == 1,
+        "stop preserved already expired rolling records");
+    const auto cleared = Object(session.Call("gbf_capture_clear", Identity(next_id)));
+    for (const auto* field : {L"retention_seconds", L"expired_records", L"dropped_records", L"truncated_records", L"filtered_requests",
+        L"record_count", L"buffer_bytes", L"started_at_ms", L"deadline_ms", L"next_cursor"})
+      Require(cleared.GetNamedNumber(field) == 0, "rolling clear retained counters or identity");
+    Require(Text(cleared, L"mode") == "bounded" && Text(cleared, L"state") == "cleared" && Text(cleared, L"capture_id").empty() &&
+        Rejects(session, "gbf_capture_read", Identity(next_id)), "rolling clear retained session");
+  }
+  {
+    uint64_t tick = 0;
+    Session session(4096, 1024, [&] { return tick; });
+    const auto id = Text(Object(session.Call("gbf_capture_start", R"({"mode":"rolling"})")), L"capture_id");
+    JsonObject item; Put(item, L"padding", std::string(300, 'x'));
+    for (unsigned index = 0; index < 40; ++index) session.Add(id, 0, "capacity", "request", Encode(item));
+    JsonObject large; Put(large, L"padding", std::string(2000, 'x')); session.Add(id, 0, "truncated", "response", Encode(large));
+    auto status = Object(session.Call("gbf_capture_status", Identity(id)));
+    Require(status.GetNamedNumber(L"dropped_records") > 0 && status.GetNamedNumber(L"expired_records") == 0 &&
+        status.GetNamedNumber(L"truncated_records") == 1 && status.GetNamedNumber(L"buffer_bytes") <= 4096, "rolling bypassed memory caps");
+    const auto count = status.GetNamedNumber(L"record_count");
+    const auto dropped = status.GetNamedNumber(L"dropped_records");
+    // An oversized metadata-only record is dropped without evicting valid records.
+    session.Add(id, 0, std::string(5000, 'x'), "request", "{}");
+    status = Object(session.Call("gbf_capture_status", Identity(id)));
+    Require(status.GetNamedNumber(L"record_count") == count && status.GetNamedNumber(L"dropped_records") == dropped + 1,
+        "oversized record discarded unrelated data");
+    const auto tail = Object(session.Call("gbf_capture_read", Arguments(id, 41)));
+    Require(tail.GetNamedBoolean(L"cursor_gap") && !tail.GetNamedBoolean(L"has_more") && tail.GetNamedNumber(L"next_cursor") == 42,
+        "discarded tail stranded cursor");
+    tick = 600000; session.Tick();
+    status = Object(session.Call("gbf_capture_status", Identity(id)));
+    Require(status.GetNamedNumber(L"expired_records") == count && status.GetNamedNumber(L"dropped_records") == dropped + 1 &&
+        status.GetNamedNumber(L"buffer_bytes") == 0 && session.Active() == id, "TTL and capacity loss were conflated");
+    const auto empty = Object(session.Call("gbf_capture_read", Arguments(id)));
+    Require(empty.GetNamedBoolean(L"cursor_gap") && !empty.GetNamedBoolean(L"has_more") && empty.GetNamedNumber(L"next_cursor") == 42,
+        "combined TTL/capacity loss stranded cursor");
   }
   CheckObserverEvents();
   CheckCaptureTransport();
-  std::cout << "PASS capture synthetic events: scope/association/redaction/pagination/time/capacity/clear; browser NOT_STARTED\n";
+  std::cout << "PASS capture synthetic events: scope/association/redaction/bounded/rolling/strict-arguments/TTL/pagination/capacity/stop/clear/IPC; browser NOT_STARTED\n";
   winrt::uninit_apartment();
 }
 }

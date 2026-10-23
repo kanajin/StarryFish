@@ -2556,7 +2556,9 @@ class Host {
     if (id == kCaptureClear) { capture_.Clear(); CaptureTick(); return; }
     if (id == kCaptureInfo) {
       const auto message = L"本机 MCP：以本程序路径启动 --capture-mcp --browser-pid " + std::to_wstring(GetCurrentProcessId()) +
-          L"\nAgent 显式启动后采集 GBF 游戏视图；正文先脱敏，仅在内存保留。\n默认 2 分钟，最长 10 分钟。菜单可停止或清除。";
+          L"\nAgent 显式启动后采集 GBF 游戏视图；正文先脱敏，仅在内存保留。"
+          L"\n默认限时 2 分钟，最长 10 分钟；mode=rolling 持续采集并保留最近 10 分钟（仍受容量上限约束）。"
+          L"\n菜单可停止或清除；停止后保留当前快照，直到清除、下次采集或退出。";
       MessageBoxW(window_, message.c_str(), L"GBF 网络抓取", MB_OK | MB_ICONINFORMATION); return;
     }
     if (id == kCacheToggle) {
@@ -3405,6 +3407,7 @@ class Host {
   std::vector<std::shared_ptr<const ExtensionPage>> pages_;
   void CaptureTick() noexcept {
     try {
+      capture_.Tick(); // Sweep rolling retention even with no views, events, or MCP clients.
       for (auto& observer : capture_observers_) if (observer) observer->Tick();
       RefreshCooldown();
       const auto label = capture_.Label();
