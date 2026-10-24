@@ -5,14 +5,14 @@
 
 namespace gbrowser::webview {
 namespace {
-constexpr int kCreate = 201, kRename = 202, kUse = 203, kDelete = 204, kRecycle = 205, kRestore = 206, kDone = 207;
+constexpr int kCreate = 201, kRename = 202, kUse = 203, kDelete = 204, kRecycle = 205, kRestore = 206, kDone = 207, kExport = 208, kImport = 209;
 std::wstring Text(HWND window) {
   const auto length = GetWindowTextLengthW(window); std::wstring result(static_cast<size_t>(length) + 1, L'\0');
   GetWindowTextW(window, result.data(), length + 1); result.resize(static_cast<size_t>(length)); return result;
 }
 }
-ProfileDialog::ProfileDialog(ProfileCatalogue& catalogue, std::string active, UiTheme& theme, std::function<void(std::string)> select)
-    : catalogue_(catalogue), theme_(theme), active_(std::move(active)), select_(std::move(select)) {}
+ProfileDialog::ProfileDialog(ProfileCatalogue& catalogue, std::string active, UiTheme& theme, std::function<void(std::string)> select, std::function<void(bool)> transfer)
+    : catalogue_(catalogue), theme_(theme), active_(std::move(active)), select_(std::move(select)), transfer_(std::move(transfer)) {}
 ProfileDialog::~ProfileDialog() { Close(); if (font_) DeleteObject(font_); }
 bool ProfileDialog::Translate(MSG& message) const { return window_ && IsDialogMessageW(window_, &message); }
 void ProfileDialog::Open(HWND owner) {
@@ -25,7 +25,7 @@ void ProfileDialog::Open(HWND owner) {
   RECT parent{}; GetWindowRect(owner, &parent);
   window_ = CreateWindowExW(WS_EX_DLGMODALFRAME, cls.lpszClassName, L"StarryFish · 用户资料",
       WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME, parent.left + UiPixels(40, dpi), parent.top + UiPixels(40, dpi),
-      UiPixels(540, dpi), UiPixels(410, dpi), owner, nullptr, cls.hInstance, this);
+      UiPixels(540, dpi), UiPixels(450, dpi), owner, nullptr, cls.hInstance, this);
   if (!window_) throw std::runtime_error("无法打开资料窗口");
   theme_.Window(window_);
   try { CreateControls(); Refresh(active_); Layout(); EnableWindow(owner_, FALSE); ShowWindow(window_, SW_SHOW); SetFocus(list_); }
@@ -45,7 +45,7 @@ void ProfileDialog::CreateControls() {
       0, 0, 10, 10, window_, nullptr, instance, nullptr);
   hint_ = CreateWindowW(L"STATIC", L"每份资料的登录态、扩展设置和代理选择独立。切换会正常关闭所有页面。", WS_CHILD | WS_VISIBLE,
       0, 0, 10, 10, window_, nullptr, instance, nullptr);
-  constexpr const wchar_t* labels[]{L"新建", L"重命名", L"切换", L"删除", L"已删除", L"恢复", L"关闭"};
+  constexpr const wchar_t* labels[]{L"新建", L"重命名", L"切换", L"删除", L"已删除", L"恢复", L"关闭", L"导出当前资料", L"导入资料"};
   for (size_t i = 0; i < buttons_.size(); ++i)
     buttons_[i] = CreateWindowW(L"BUTTON", labels[i], WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
         0, 0, 10, 10, window_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kCreate + i)), instance, nullptr);
@@ -65,7 +65,7 @@ void ProfileDialog::Layout() {
   if (font_) DeleteObject(font_); font_ = next;
   RECT client{}; GetClientRect(window_, &client);
   const int margin = UiPixels(16, dpi), width = (std::max)(1L, client.right - 2 * margin);
-  const int name_y = (std::max)(margin + UiPixels(100, dpi), static_cast<int>(client.bottom) - UiPixels(124, dpi));
+  const int name_y = (std::max)(margin + UiPixels(100, dpi), static_cast<int>(client.bottom) - UiPixels(158, dpi));
   MoveWindow(hint_, margin, margin, width, UiPixels(40, dpi), TRUE);
   MoveWindow(list_, margin, margin + UiPixels(48, dpi), width, name_y - margin - UiPixels(56, dpi), TRUE);
   MoveWindow(name_, margin, name_y, width, UiPixels(28, dpi), TRUE);
@@ -94,6 +94,7 @@ void ProfileDialog::Refresh(const std::string& selected) {
   SetWindowTextW(name_, rows_.empty() ? L"" : catalogue_.Find(Selection(), true).name.c_str());
 }
 void ProfileDialog::Action(int action) {
+  if (action == kExport || action == kImport) { Close(); transfer_(action == kImport); return; }
   if (action == kDone) { Close(); return; }
   if (action == kRecycle) { recycled_ = !recycled_; Refresh(); return; }
   if (action == kCreate) { const auto id = catalogue_.Create(Text(name_)); Refresh(id); return; }
@@ -135,7 +136,7 @@ LRESULT CALLBACK ProfileDialog::Procedure(HWND window, UINT message, WPARAM wpar
     }
     if (message == WM_GETMINMAXINFO) {
       const auto dpi = GetDpiForWindow(window);
-      reinterpret_cast<MINMAXINFO*>(lparam)->ptMinTrackSize = {UiPixels(500, dpi), UiPixels(380, dpi)}; return 0;
+      reinterpret_cast<MINMAXINFO*>(lparam)->ptMinTrackSize = {UiPixels(500, dpi), UiPixels(420, dpi)}; return 0;
     }
     if (message == WM_COMMAND) {
       if (reinterpret_cast<HWND>(lparam) == dialog->list_ && HIWORD(wparam) == LBN_SELCHANGE)

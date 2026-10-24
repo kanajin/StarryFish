@@ -10,7 +10,7 @@
 
 ## 下载与安装
 
-v0.1.11 新增本机 MCP 持续滚动采集与十分钟内存窗口；技能 CD 悬浮条与 MCP 抓包仍可从「三点 → 功能」使用。
+v0.1.12 新增原生键盘快捷键和加密资料导出/导入；导入配置后需重新登录。另附 [WebView 快捷键 SDK 开发者预览](sdk/webview-hotkeys/README.md)，不含 Chrome/Iron 扩展。
 
 在 [Releases](https://github.com/kanajin/StarryFish/releases/latest) 下载 **StarryFish-版本-windows-x64-setup.exe**，直接运行单个安装器，无需解压。
 
@@ -24,7 +24,8 @@ v0.1.11 新增本机 MCP 持续滚动采集与十分钟内存窗口；技能 CD 
 ## 功能
 
 - 两种布局：紧凑侧栏 / 经典双排工具栏；浅色天蓝、深色群青。两布局采用网页图标标签，空间不足时重叠排列；均提供刷新按钮。界面需求见 [UI_REQUIREMENTS.md](docs/UI_REQUIREMENTS.md)。
-- 独立用户资料、代理选择与窗口布局记忆。
+- 独立用户资料、代理选择与窗口布局记忆；支持 [加密资料导出/导入](docs/PROFILE_TRANSFER.md)，迁移布局、快捷键、太郎 Buff 标记、书签和汉化配置。
+- 原生键盘快捷键：总开关、逐项开关、自定义单键及预输入队列；配置重启保留。
 - 代理菜单读取 ZeroOmega 的自定义情景模式并支持切换，实际配置匹配的当前模式显示勾选。
 - 三点 → 功能可隐藏 GBF 加载界面中的角色和 “Now Loading...” 文字，保留暗色加载背景。
 - 技能 CD 悬浮条：读取技能使用、刷新、攻击及同结构结算响应；四角色分组、四技能固定格，支持拖动、50%–200% 等比例缩放、双击右下角恢复、悬停关闭及主/副窗跟随。亮格为 CD 0，× 为缺少技能，? 为未知；不自动操作游戏。
@@ -66,7 +67,11 @@ python -B build.py test
 python -B build.py verify
 python -B build.py package-setup
 cd ../..
-python -B tools/package_release.py 0.1.11
+cd sdk/webview-hotkeys
+python -B build.py build
+python -B build.py test
+cd ../..
+python -B tools/package_release.py 0.1.12
 ```
 
 依赖从官方固定 URL 获取并验证 SHA256。太郎/肉鸽固定快照仅用于构建检查；终端用户首装可解析上游最新版本，或选择两个本地 ZIP。包输出在 `dist/`。推送 `main` 会构建并保留检查产物，推送 `v*` 标签会额外发布 GitHub Release；工作流不会访问或上传本地用户资料。发布新版本前需同时更新 `VERSION` 与 `RELEASE_NOTES.md`，标签版本必须与 `VERSION` 一致。

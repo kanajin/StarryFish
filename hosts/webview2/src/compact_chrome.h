@@ -11,7 +11,7 @@ struct CompactToolbar {
 };
 struct BrowserToolbar {
   Rect tabs, add, minimize, maximize, close, address, copy, reload;
-  std::array<Rect, 7> functions; // Tarou, Arcarum, proxy, dual, management, profile, menu.
+  std::array<Rect, 8> functions; // Tarou, Arcarum, proxy, keyboard, dual, management, profile, menu.
 };
 inline BrowserToolbar BrowserToolbarGeometry(int width, unsigned dpi, size_t tab_count) {
   const auto px = [dpi](int n) { return UiPixels(n, dpi); };
@@ -25,7 +25,7 @@ inline BrowserToolbar BrowserToolbarGeometry(int width, unsigned dpi, size_t tab
   out.tabs = {px(8), px(4), tab_width, px(34)};
   out.add = {px(12) + tab_width, px(4), px(30), px(30)};
   out.reload = {px(6), px(46), px(30), px(32)};
-  const int function_x = width - px(244);
+  const int function_x = width - px(278);
   for (size_t i = 0; i < out.functions.size(); ++i)
     out.functions[i] = {function_x + px(static_cast<int>(i) * 34), px(46), px(32), px(32)};
   out.address = {px(46), px(46), (std::max)(0, function_x - px(86)), px(32)};

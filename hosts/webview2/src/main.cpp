@@ -1,5 +1,6 @@
 #include <windows.h>
 #include <roapi.h>
+#include <bcrypt.h>
 #include <shellapi.h>
 #include <shlobj.h>
 #include <commctrl.h>
@@ -22,6 +23,7 @@
 #include "user_state.h"
 #include "profile_catalogue.h"
 #include "profile_dialog.h"
+#include "profile_transfer.h"
 #include "proxy_preference.h"
 #include "proxy_profiles.h"
 #include "bookmark_navigation.h"
@@ -40,6 +42,8 @@
 #include "resource_cache.h"
 #include "network_capture.h"
 #include "skill_overlay.h"
+#include "character_shortcuts.h"
+#include "shortcut_dialog.h"
 #include <shlwapi.h>
 #include <array>
 #include <algorithm>
@@ -67,7 +71,8 @@ constexpr int kLayout1 = 130, kLayout2 = 131, kReload = 134;
 constexpr int kCacheToggle = 135, kCacheInfo = 136, kCacheClear = 137;
 constexpr int kHideLoading = 138;
 constexpr int kCaptureStop = 139, kCaptureInfo = 140, kCaptureClear = 141;
-constexpr int kSkillCooldown = 142;
+constexpr int kSkillCooldown = 142, kCharacterKeys = 143;
+constexpr UINT_PTR kCharacterTimer = 12;
 constexpr UINT kCacheResult = WM_APP + 10;
 constexpr UINT kProxyMenuReady = WM_APP + 11;
 constexpr UINT_PTR kShutdownTimer = 11;
@@ -162,6 +167,13 @@ struct BookmarkRequest {
 
 // One STA owns the fixed game/helper/proxy/login roles and seven optional
 // shared-profile tabs. Optional views are created only on explicit user action.
+struct PendingProfileImport {
+  std::string id, previous;
+  bool restored = false;
+  gbrowser::webview::transfer::JsonObject document;
+};
+std::shared_ptr<PendingProfileImport> pending_profile_import;
+
 class Host {
  public:
   explicit Host(const gbrowser::webview::LaunchPlan& plan, const wchar_t*& phase, const std::string& requested = {})
@@ -188,25 +200,34 @@ class Host {
     RequireSafePath(installation_state_); directories_.CreateTree(installation_state_);
     phase_ = L"读取本机资料索引";
     profiles_ = std::make_unique<gbrowser::webview::ProfileCatalogue>(installation_state_, plan.data_leaf);
+    profile_leaf_ = plan.data_leaf;
     active_profile_ = requested.empty() ? profiles_->state().selected : requested;
     profiles_->Find(active_profile_);
     data_ = gbrowser::webview::ProfileDataPath(installation_state_, plan.data_leaf, active_profile_);
     phase_ = L"核对资料目录身份（路径重定向会被拒绝）";
     RequireSafePath(data_); directories_.CreateTree(data_);
     data_lock_ = std::make_unique<DataRootLock>(data_); timings_.Open(data_, started);
+    settings_root_ = installation_state_;
+    if (std::filesystem::exists(data_ / L"HostSettings")) settings_root_ = directories_.Tree(data_ / L"HostSettings");
     proxy_preference_ = std::make_unique<gbrowser::webview::ProxyPreference>(data_);
+    { gbrowser::webview::UserStateFile overlay(settings_root_ / L"skill-overlay.state");
+      skill_enabled_ = overlay.bytes() && *overlay.bytes() == "ON\n"; }
     phase_ = L"读取全局窗口布局";
-    window_file_ = std::make_unique<gbrowser::webview::UserStateFile>(installation_state_ / L"window-layout.state");
+    try {
+      shortcut_file_ = std::make_unique<gbrowser::webview::UserStateFile>(settings_root_ / L"shortcut-keys.state");
+      if (shortcut_file_->bytes()) shortcut_keys_ = gbrowser::webview::characters::Decode(*shortcut_file_->bytes());
+    } catch (...) { shortcut_file_.reset(); }
+    window_file_ = std::make_unique<gbrowser::webview::UserStateFile>(settings_root_ / L"window-layout.state");
     if (window_file_->bytes()) {
       window_state_ = gbrowser::webview::DecodeWindowState(*window_file_->bytes());
       panel_percent_ = window_state_.panel_percent;
     }
-    pane_file_ = std::make_unique<gbrowser::webview::UserStateFile>(installation_state_ / L"game-panes.state");
+    pane_file_ = std::make_unique<gbrowser::webview::UserStateFile>(settings_root_ / L"game-panes.state");
     if (pane_file_->bytes()) panes_ = gbrowser::webview::DecodePaneState(*pane_file_->bytes(), panel_percent_);
     else { panes_.group_percent = panel_percent_;
       panes_.tarou_share = (std::clamp)(panel_percent_ * 100 / (panel_percent_ + 100), 1U, 99U) * 100; }
     panel_percent_ = panes_.group_percent;
-    tarou_window_file_ = std::make_unique<gbrowser::webview::UserStateFile>(installation_state_ / L"tarou-window.state");
+    tarou_window_file_ = std::make_unique<gbrowser::webview::UserStateFile>(settings_root_ / L"tarou-window.state");
     if (tarou_window_file_->bytes()) tarou_window_state_ = gbrowser::webview::DecodeWindowState(*tarou_window_file_->bytes());
     phase_ = L"核对程序更新是否完成";
     gbrowser::webview::RequireCompleteApplicationUpdate(root_);
@@ -234,16 +255,16 @@ class Host {
     theme_.LoadIcon(0, sources_[0] / L"img/icons/omega-48.png");
     theme_.LoadIcon(1, sources_[1] / L"assets/icon-48.png");
     theme_.LoadIcon(2, sources_[2] / L"icons/icon-48.png");
-    appearance_file_ = std::make_unique<gbrowser::webview::UserStateFile>(installation_state_ / L"appearance.state");
+    appearance_file_ = std::make_unique<gbrowser::webview::UserStateFile>(settings_root_ / L"appearance.state");
     if (appearance_file_->bytes()) theme_.SetDark(gbrowser::webview::DecodeDarkAppearance(*appearance_file_->bytes()));
-    layout_choice_file_ = std::make_unique<gbrowser::webview::UserStateFile>(installation_state_ / L"layout-choice.state");
+    layout_choice_file_ = std::make_unique<gbrowser::webview::UserStateFile>(settings_root_ / L"layout-choice.state");
     if (layout_choice_file_->bytes()) browser_layout_ = gbrowser::webview::DecodeBrowserLayout(*layout_choice_file_->bytes());
     try {
-      loading_display_file_ = std::make_unique<gbrowser::webview::UserStateFile>(installation_state_ / L"loading-display.state");
+      loading_display_file_ = std::make_unique<gbrowser::webview::UserStateFile>(settings_root_ / L"loading-display.state");
       if (loading_display_file_->bytes()) hide_loading_ = gbrowser::webview::DecodeHiddenLoading(*loading_display_file_->bytes());
     } catch (...) { loading_display_file_.reset(); } // Optional cosmetic state never stops a game session.
     try {
-      cache_setting_ = std::make_unique<gbrowser::webview::UserStateFile>(installation_state_ / L"static-cache.state");
+      cache_setting_ = std::make_unique<gbrowser::webview::UserStateFile>(settings_root_ / L"static-cache.state");
       if (cache_setting_->bytes()) cache_enabled_ = *cache_setting_->bytes() == "STARRYFISH-CACHE-ON\n";
     } catch (...) { cache_enabled_ = false; }
   }
@@ -254,6 +275,7 @@ class Host {
     // before destroying the notification HWND; normal close already drained it.
     resource_cache_.reset();
     // Detach this stack object before destroying its native window.
+    if (shortcut_dialog_) shortcut_dialog_->Close();
     if (profile_dialog_) profile_dialog_->Close();
     if (arcarum_window_) { SetWindowLongPtrW(arcarum_window_, GWLP_USERDATA, 0); DestroyWindow(arcarum_window_); }
     if (tarou_window_) { SetWindowLongPtrW(tarou_window_, GWLP_USERDATA, 0); DestroyWindow(tarou_window_); }
@@ -271,6 +293,8 @@ class Host {
     Close();
   }
   bool PreTranslate(const MSG& message) {
+    if (transfer_busy_) return message.message == WM_KEYDOWN || message.message == WM_SYSKEYDOWN;
+    if (shortcut_dialog_) { auto copy = message; if (shortcut_dialog_->Translate(copy)) return true; }
     if (profile_dialog_) { auto copy = message; if (profile_dialog_->Translate(copy)) return true; }
     // Native controls need the same commands as page accelerators. Login
     // keystrokes, including KeePassXC input, never enter this command path.
@@ -327,6 +351,13 @@ class Host {
         mode_ == RunMode::Offline ? L"StarryFish · 离线候选" : L"StarryFish · 游戏候选", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
         CW_USEDEFAULT, CW_USEDEFAULT, 1200, 800, nullptr, nullptr, instance, this);
     if (!window_) throw std::runtime_error("无法创建候选窗口");
+    if (shortcut_keys_.master) {
+      RAWINPUTDEVICE keyboard{0x01,0x06,0u,window_};
+      if (!RegisterRawInputDevices(&keyboard,1,sizeof(keyboard))) throw std::runtime_error("无法恢复键盘快捷键输入");
+      character_enabled_=true;
+      for(size_t key=0;key<character_tracker_.down.size();++key)
+        character_tracker_.down[key]=(GetAsyncKeyState(static_cast<int>(key))&0x8000)!=0;
+    }
     address_ = CreateWindowExW(0, L"EDIT", L"GBF My Page", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
         0, 0, 10, 10, window_, nullptr, instance, nullptr);
     tabs_ = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | SS_NOTIFY,
@@ -358,6 +389,7 @@ class Host {
     buttons_[14] = Button(instance, kExit, L"关闭浏览器");
     buttons_[15] = Button(instance, kReload, L"刷新");
     buttons_[16] = Button(instance, kNewTab, L"新建标签");
+    buttons_[17] = Button(instance, kCharacterKeys, L"键盘快捷键");
     tarou_title_ = CreateWindowW(L"STATIC", L"Tarou", WS_CHILD | WS_CLIPSIBLINGS | SS_OWNERDRAW,
         0, 0, 10, 10, window_, nullptr, instance, nullptr);
     const auto frame = [&] {
@@ -378,10 +410,10 @@ class Host {
     const auto tips = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,
         CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, window_, nullptr, instance, nullptr);
     if (tips) {
-      const std::array<const wchar_t*, 17> names{L"用户资料", L"ZeroOmega 代理", L"打开/关闭太郎", L"打开/关闭肉鸽",
+      const std::array<const wchar_t*, 18> names{L"用户资料", L"ZeroOmega 代理", L"打开/关闭太郎", L"打开/关闭肉鸽",
           L"单窗/双窗", L"复制当前网址", L"组件管理", L"更多 · 外观与浏览器功能", L"副窗口跟随主窗口一次；同网址则刷新",
           L"拆出肉鸽", L"关闭太郎", L"拆出/停靠太郎", L"最小化", L"最大化 / 还原", L"关闭浏览器",
-          L"刷新", L"新建标签 · Ctrl+T"};
+          L"刷新", L"新建标签 · Ctrl+T", L"键盘快捷键设置"};
       for (size_t i = 0; i < buttons_.size(); ++i) {
         TOOLINFOW tool{sizeof(tool)}; tool.uFlags = TTF_IDISHWND | TTF_SUBCLASS; tool.hwnd = window_;
         tool.uId = reinterpret_cast<UINT_PTR>(buttons_[i]); tool.lpszText = const_cast<wchar_t*>(names[i]);
@@ -526,6 +558,20 @@ class Host {
     auto core = views_[index].core;
     const auto generation = view_generations_[index];
     EventRegistrationToken token{};
+    if (gbrowser::webview::GameSurface(index)) {
+      Check(views_[index].controller->add_GotFocus(Callback<ICoreWebView2FocusChangedEventHandler>(
+          [this, index, generation](ICoreWebView2Controller*, IUnknown*) -> HRESULT {
+            if (!closing_ && CurrentView(index, generation)) character_focused_view_ = index;
+            return S_OK;
+          }).Get(), &token));
+      Check(views_[index].controller->add_LostFocus(Callback<ICoreWebView2FocusChangedEventHandler>(
+          [this, index, generation](ICoreWebView2Controller*, IUnknown*) -> HRESULT {
+            if (!closing_ && CurrentView(index, generation) && character_focused_view_ == index) {
+              character_focused_view_ = views_.size(); character_tracker_ = {}; CancelCharacterSwitch();
+            }
+            return S_OK;
+          }).Get(), &token));
+    }
     if (gbrowser::webview::GameSurface(index)) Check(views_[index].controller->add_ZoomFactorChanged(
         Callback<ICoreWebView2ZoomFactorChangedEventHandler>(
             [this, index, generation](ICoreWebView2Controller*, IUnknown*) -> HRESULT {
@@ -539,9 +585,18 @@ class Host {
                 if (!CurrentView(index, generation) || closing_ ||
                     (index != active_ && index != 1 && index != kLeftGame && index != kArcarumView)) return;
                 COREWEBVIEW2_KEY_EVENT_KIND kind{}; Check(args->get_KeyEventKind(&kind));
-                if (kind != COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN &&
-                    kind != COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN) return;
-                UINT key = 0; Check(args->get_VirtualKey(&key));
+                const bool released=kind==COREWEBVIEW2_KEY_EVENT_KIND_KEY_UP || kind==COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_UP;
+                UINT key=0;Check(args->get_VirtualKey(&key));
+                const bool modified=(GetKeyState(VK_CONTROL)&0x8000)||(GetKeyState(VK_MENU)&0x8000)||
+                    (GetKeyState(VK_SHIFT)&0x8000)||(GetKeyState(VK_LWIN)&0x8000)||(GetKeyState(VK_RWIN)&0x8000);
+                if(character_enabled_ && gbrowser::webview::GameSurface(index) &&
+                    gbrowser::webview::characters::Actions(shortcut_keys_,key) && !gbrowser::webview::characters::Modifier(key)) {
+                  // Raw input owns all gesture edges, including Escape/F-keys.
+                  // The accelerator only suppresses the browser's default action;
+                  // forwarding here can lose releases or duplicate a raw gesture.
+                  if(!modified){Check(args->put_Handled(TRUE));return;}
+                }
+                if(released)return;
                 const auto action = PageKey(key);
                 if (action == Shortcut::None) return;
                 Check(args->put_Handled(TRUE));
@@ -559,6 +614,7 @@ class Host {
           args->put_Cancel(TRUE);
           Guard([&] {
             if (!CurrentView(index, generation)) return;
+            if (character_busy_ && character_view_ == index) CancelCharacterSwitch();
             ++navigation_epochs_[index]; // Deferred bookmark opens cannot outlive their document.
             if (index == 2) {
               controller_ready_ = false;
@@ -660,6 +716,7 @@ class Host {
         [this, index, generation](ICoreWebView2*, ICoreWebView2SourceChangedEventArgs* args) -> HRESULT {
           Guard([&] {
             if (!CurrentView(index, generation) || closing_) return;
+            if (character_busy_ && character_view_ == index) CancelCharacterSwitch();
             BOOL document = FALSE; Check(args->get_IsNewDocument(&document));
             if (gbrowser::webview::GameSurface(index)) {
               const auto source = WideToUtf8(GameSource(index));
@@ -805,6 +862,210 @@ class Host {
       Check(core->NavigateToString(page.c_str()));
     }
   }
+  void CharacterTrace(const char* event,int value=0) noexcept {
+    try {
+      // Explicit local diagnostic opt-in, checked once to keep normal input cheap.
+      static const auto output=[] {
+        wchar_t path[32768]{};GetModuleFileNameW(nullptr,path,32768);
+        const auto root=std::filesystem::path(path).parent_path();
+        return std::filesystem::exists(root/L"shortcut-diagnostics.enabled")?
+            root/L"shortcut-diagnostics.log":std::filesystem::path{};
+      }();
+      if(output.empty())return;
+      std::ofstream out(output,std::ios::app);
+      out<<GetTickCount64()<<" "<<event<<" "<<value<<"\n";
+    }catch(...){}
+  }
+  void CharacterKeyboardInput(HRAWINPUT handle) noexcept {
+    // Foreground-only raw keyboard input is necessary: WebView2's accelerator
+    // event deliberately excludes ordinary digits. No background registration,
+    // global hook, text collection, or suppression of normal page input.
+    if (!character_enabled_ || closing_ || transfer_busy_) return;
+    RAWINPUT input{}; UINT bytes = sizeof(input);
+    if (GetRawInputData(handle, RID_INPUT, &input, &bytes, sizeof(RAWINPUTHEADER)) == static_cast<UINT>(-1) ||
+        input.header.dwType != RIM_TYPEKEYBOARD) return;
+    const auto key = gbrowser::webview::characters::NormalizeKey(input.data.keyboard.VKey);
+    const bool released = (input.data.keyboard.Flags & RI_KEY_BREAK) != 0;
+    const bool modified = (GetAsyncKeyState(VK_CONTROL) & 0x8000) || (GetAsyncKeyState(VK_MENU) & 0x8000) ||
+        (GetAsyncKeyState(VK_SHIFT) & 0x8000) || (GetAsyncKeyState(VK_LWIN) & 0x8000) || (GetAsyncKeyState(VK_RWIN) & 0x8000);
+    CharacterKeyInput(key,released,modified);
+  }
+  void CharacterKeyInput(unsigned key,bool released,bool modified) noexcept {
+    if (!character_enabled_ || closing_) return;
+    const auto picked = character_tracker_.Feed(key, released, modified);
+    if(gbrowser::webview::characters::Actions(shortcut_keys_,key))CharacterTrace(released?"release":"press",static_cast<int>(gbrowser::webview::characters::Actions(shortcut_keys_,key)));
+    if (GetForegroundWindow() != window_) return;
+    const int slot = gbrowser::webview::characters::Actions(shortcut_keys_, picked);
+    CharacterTrace("picked",slot);
+    if (!slot) { if (!released && key < 256 && !gbrowser::webview::characters::Actions(shortcut_keys_, key)) CancelCharacterSwitch(); return; }
+    const auto index = character_focused_view_;
+    if (index >= views_.size() || !gbrowser::webview::GameSurface(index)) return;
+    if (character_busy_ && CharacterContext()) {
+      character_queue_.Push(static_cast<unsigned>(slot)); return;
+    }
+    StartCharacterSwitch(index, view_generations_[index], slot);
+  }
+  void CancelCharacterSwitch(bool clear_queue=true) {
+    if(character_busy_)CharacterTrace("cancel-phase",character_sequence_.phase);
+    if(clear_queue)character_queue_.Clear();
+    KillTimer(window_, kCharacterTimer);
+    character_busy_ = false; character_pending_ = false; ++character_epoch_;
+    character_source_.clear(); character_motion_ = {};
+  }
+  void StartCharacterSwitch(size_t index, uint64_t generation, int slot, bool queued=false) {
+    // A foreground native key gesture starts a bounded sequence. Renderer
+    // calls begin on the next timer tick, never inside input dispatch.
+    CancelCharacterSwitch(!queued);
+    if (!character_enabled_ || closing_ || failed_ || GetForegroundWindow() != window_) return;
+    CharacterTrace("start",slot);
+    character_view_ = index; character_generation_ = generation;
+    character_navigation_ = navigation_epochs_[index]; character_slot_ = slot; character_context_.clear();
+    character_focus_ = GetFocus();
+    if (!character_focus_ || !GetCursorPos(&character_cursor_)) return;
+    character_sequence_ = {}; character_sequence_.allow_confirmation=(slot & (1u<<17))!=0; character_sequence_.started = GetTickCount64();
+    character_busy_ = SetTimer(window_, kCharacterTimer, 50, nullptr) != 0;
+  }
+  void CompleteCharacterSwitch() {
+    // Revalidate the origin before advancing. Every queued action probes fresh
+    // DOM state, so e.g. 3,Q uses character 3's skill after its panel opens.
+    if(!CharacterContext()) {CancelCharacterSwitch();return;}
+    const auto next=character_queue_.Pop();
+    if(!next) {CancelCharacterSwitch();return;}
+    const auto index=character_view_;const auto generation=character_generation_;
+    StartCharacterSwitch(index,generation,static_cast<int>(next),true);
+    if(character_busy_)PollCharacterSwitch();else character_queue_.Clear();
+  }
+  bool CharacterContext() {
+    POINT cursor{};
+    if (!character_busy_ || !character_enabled_ || closing_ || failed_ ||
+        character_sequence_.Expired(GetTickCount64()) || GetForegroundWindow() != window_ ||
+        GetFocus() != character_focus_ || character_focused_view_ != character_view_ ||
+        !CurrentView(character_view_, character_generation_) ||
+        navigation_epochs_[character_view_] != character_navigation_ ||
+        !(character_view_ == active_ || (character_view_ == kLeftGame && panes_.dual)) ||
+        !views_[character_view_].visible.value_or(false) || !GetCursorPos(&cursor) ||
+        std::abs(cursor.x - character_cursor_.x) > 2 || std::abs(cursor.y - character_cursor_.y) > 2) return false;
+    for (int key : {VK_LBUTTON, VK_RBUTTON, VK_MBUTTON, VK_CONTROL, VK_MENU, VK_SHIFT, VK_LWIN, VK_RWIN})
+      if (GetAsyncKeyState(key) & 0x8000) return false;
+    return true;
+  }
+  void PollCharacterSwitch() noexcept {
+    try {
+      if (!CharacterContext()) { CharacterTrace("context-failed"); CancelCharacterSwitch(); return; }
+      if (character_pending_) return;
+      const auto index = character_view_;
+      const auto source = WideToUtf8(GameSource(index));
+      if (((character_slot_ & (1u << 4)) ? !IsGbfPageUrl(source) : gbrowser::webview::cooldown::BattleRoute(source).empty()) ||
+          (!character_source_.empty() && character_source_ != source)) { CancelCharacterSwitch(); return; }
+      character_source_ = source;
+      using namespace winrt::Windows::Data::Json;
+      const auto quoted = JsonValue::CreateStringValue(Utf8ToWide(source)).Stringify();
+      const auto script = Utf8ToWide(std::string(kCharacterShortcutScript)) + L"(" + std::wstring(quoted.c_str()) +
+          L"," + std::to_wstring(character_slot_) + L"," + std::to_wstring(character_sequence_.phase) + L"," +
+          std::wstring(JsonValue::CreateStringValue(Utf8ToWide(character_context_)).Stringify().c_str()) + L");";
+      RECT bounds{}; Check(views_[index].controller->get_Bounds(&bounds));
+      HWND parent = nullptr; Check(views_[index].controller->get_ParentWindow(&parent));
+      POINT origin{}; if (!ClientToScreen(parent, &origin)) { CancelCharacterSwitch(); return; }
+      const auto epoch = character_epoch_;
+      const auto callback = callbacks_.Track(); character_pending_ = true;
+      const auto result = views_[index].core->ExecuteScript(script.c_str(),
+          Callback<ICoreWebView2ExecuteScriptCompletedHandler>(
+              [this, callback, epoch, index, bounds, parent, origin](HRESULT error, LPCWSTR encoded) -> HRESULT {
+                if (!callback.Complete()) return S_OK;
+                if (epoch != character_epoch_) return S_OK;
+                character_pending_ = false;
+                try {
+                  if (FAILED(error) || !encoded || !CharacterContext() ||
+                      WideToUtf8(GameSource(index)) != character_source_) { CancelCharacterSwitch(); return S_OK; }
+                  JsonObject reply;
+                  if (!JsonObject::TryParse(encoded, reply)) { CancelCharacterSwitch(); return S_OK; }
+                  const auto action = reply.GetNamedNumber(L"action", 0);
+                  CharacterTrace("dom",static_cast<int>(action));
+                  CharacterTrace("reason",static_cast<int>(reply.GetNamedNumber(L"reason",0)));
+                  if (action == 5 && (character_slot_ & (1u << 4))) { CancelCharacterSwitch(); Check(views_[index].core->Reload()); return S_OK; }
+                  if (action == 0) { CancelCharacterSwitch(); return S_OK; }
+                  if (action == 4) { CompleteCharacterSwitch(); return S_OK; }
+                  if (action == 1) { character_sequence_.previous_action = 0; character_motion_ = {}; return S_OK; }
+                  const auto context = WideToUtf8(std::wstring(reply.GetNamedString(L"context", L"").c_str()));
+                  if (context.empty() || (!character_context_.empty() && context != character_context_)) { CancelCharacterSwitch(); return S_OK; }
+                  character_context_ = context;
+                  if (action != 2 && action != 3 && action != 6) { CancelCharacterSwitch(); return S_OK; }
+                  const double x = reply.GetNamedNumber(L"x"), y = reply.GetNamedNumber(L"y");
+                  const double scale = reply.GetNamedNumber(L"scale"), width = reply.GetNamedNumber(L"width"), height = reply.GetNamedNumber(L"height");
+                  if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(scale) || !std::isfinite(width) || !std::isfinite(height) ||
+                      scale < 0.1 || scale > 16 || x < 0 || y < 0 || width <= 0 || height <= 0 || x >= width || y >= height ||
+                      std::abs(width * scale - (bounds.right - bounds.left)) > scale + 1 ||
+                      std::abs(height * scale - (bounds.bottom - bounds.top)) > scale + 1) { CancelCharacterSwitch(); return S_OK; }
+                  RECT current{}; Check(views_[index].controller->get_Bounds(&current));
+                  HWND current_parent = nullptr; Check(views_[index].controller->get_ParentWindow(&current_parent));
+                  POINT current_origin{};
+                  if (current_parent != parent || !EqualRect(&bounds, &current) || !ClientToScreen(parent, &current_origin) ||
+                      current_origin.x != origin.x || current_origin.y != origin.y) { CancelCharacterSwitch(); return S_OK; }
+                  POINT point{origin.x + bounds.left + static_cast<LONG>(std::lround(x * scale)),
+                      origin.y + bounds.top + static_cast<LONG>(std::lround(y * scale))};
+                  RECT clip{}; GetClientRect(parent, &clip);
+                  POINT client{point.x - origin.x, point.y - origin.y};
+                  const HWND hit = WindowFromPoint(point);
+                  if (!PtInRect(&bounds, client) || !PtInRect(&clip, client) || !hit ||
+                      (hit != character_focus_ && !IsChild(character_focus_, hit))) { CancelCharacterSwitch(); return S_OK; }
+                  auto next_sequence = character_sequence_;
+                  if (!next_sequence.Click(static_cast<int>(action), point.x, point.y)) {
+                    character_sequence_ = next_sequence; character_motion_ = {}; return S_OK;
+                  }
+                  const int left = GetSystemMetrics(SM_XVIRTUALSCREEN), top = GetSystemMetrics(SM_YVIRTUALSCREEN);
+                  const int width_pixels = GetSystemMetrics(SM_CXVIRTUALSCREEN), height_pixels = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+                  if (width_pixels <= 1 || height_pixels <= 1 || !CharacterContext()) { CancelCharacterSwitch(); return S_OK; }
+                  const auto now = GetTickCount64();
+                  const bool starting_motion=!character_motion_.active;
+                  if (starting_motion) {
+                    unsigned seed=0;
+                    if (BCryptGenRandom(nullptr,reinterpret_cast<PUCHAR>(&seed),sizeof(seed),BCRYPT_USE_SYSTEM_PREFERRED_RNG)<0) { CancelCharacterSwitch(); return S_OK; }
+                    character_motion_.Begin(character_cursor_.x,character_cursor_.y,point.x,point.y,now,seed);
+                    SetTimer(window_,kCharacterTimer,USER_TIMER_MINIMUM,nullptr);
+                  }
+                  if (character_motion_.to_x!=point.x || character_motion_.to_y!=point.y) { CancelCharacterSwitch(); return S_OK; }
+                  const bool arrived=character_motion_.Done(now);
+                  // Emit the curved midpoint immediately; the next validated sample
+                  // finishes the near-instant path without a long animation.
+                  const auto sample=character_motion_.At(starting_motion?now+character_motion_.duration/2:now);
+                  point.x=std::clamp(static_cast<LONG>(std::lround(sample[0])),static_cast<LONG>(left),static_cast<LONG>(left+width_pixels-1));
+                  point.y=std::clamp(static_cast<LONG>(std::lround(sample[1])),static_cast<LONG>(top),static_cast<LONG>(top+height_pixels-1));
+                  if (arrived) {character_sequence_=next_sequence;character_motion_={};SetTimer(window_,kCharacterTimer,50,nullptr);}
+                  INPUT input[3]{};
+                  for (auto& event : input) event.type = INPUT_MOUSE;
+                  input[0].mi.dx = static_cast<LONG>(std::lround((point.x - left) * 65535.0 / (width_pixels - 1)));
+                  input[0].mi.dy = static_cast<LONG>(std::lround((point.y - top) * 65535.0 / (height_pixels - 1)));
+                  input[0].mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+                  input[1].mi.dwFlags = MOUSEEVENTF_LEFTDOWN; input[2].mi.dwFlags = MOUSEEVENTF_LEFTUP;
+                  character_cursor_ = point;
+                  const UINT count=arrived?3:1;
+                  const UINT sent = SendInput(count, input, sizeof(INPUT));
+                  if (sent != count) {
+                    // If only move+down entered the stream, release our own
+                    // button without replaying the failed click sequence.
+                    if (sent == 2) SendInput(1, &input[2], sizeof(INPUT));
+                    CancelCharacterSwitch();
+                  }
+                } catch (...) { CancelCharacterSwitch(); }
+                return S_OK;
+              }).Get());
+      if (FAILED(result)) { callback.Complete(); CancelCharacterSwitch(); }
+    } catch (...) { CancelCharacterSwitch(); }
+  }
+  bool character_enabled_ = false, character_busy_ = false, character_pending_ = false;
+  size_t character_view_ = 0, character_focused_view_ = gbrowser::webview::TabSlots::kViewCount;
+  gbrowser::webview::characters::KeyTracker character_tracker_;
+  gbrowser::webview::characters::InputQueue character_queue_;
+  gbrowser::webview::characters::Bindings shortcut_keys_ = gbrowser::webview::characters::Defaults();
+  std::unique_ptr<gbrowser::webview::UserStateFile> shortcut_file_;
+  std::unique_ptr<gbrowser::webview::ShortcutDialog> shortcut_dialog_;
+  int character_slot_ = 0;
+  uint64_t character_epoch_ = 0, character_generation_ = 0, character_navigation_ = 0;
+  HWND character_focus_ = nullptr;
+  POINT character_cursor_{};
+  std::string character_source_, character_context_;
+  gbrowser::webview::characters::Sequence character_sequence_;
+  gbrowser::webview::characters::Motion character_motion_;
   void ApplyLoadingDisplay(size_t index) noexcept {
     if (closing_ || !gbrowser::webview::GameSurface(index) || !views_[index].core) return;
     try {
@@ -1032,6 +1293,11 @@ class Host {
     else {
       // UDF was read back from the environment; now all fixed components are
       // verified. A failed target never replaces the previous successful ID.
+      if (pending_profile_import && pending_profile_import->id == active_profile_) {
+        if (!pending_profile_import->restored) { RestoreProfile(); return; }
+        gbrowser::webview::transfer::RestoreSessionCookies(views_[0].core.Get(), pending_profile_import->document);
+        pending_profile_import.reset();
+      }
       profiles_->Activate(active_profile_);
       timings_.Mark("component-registrations-ready");
       phase_ = L"准备代理控制页";
@@ -2353,9 +2619,9 @@ class Host {
     auto top = gbrowser::webview::ToolbarGeometry(width, Dpi(), tab_order_.size());
     if (browser_layout_) {
       const auto browser = gbrowser::webview::BrowserToolbarGeometry(width, Dpi(), tab_order_.size());
-      top = {browser.address, browser.copy, browser.tabs, browser.functions[5],
+      top = {browser.address, browser.copy, browser.tabs, browser.functions[6],
           browser.minimize, browser.maximize, browser.close, browser.add, browser.reload};
-      const std::array<size_t, 7> actions{2, 3, 1, 4, 6, 0, 7};
+      const std::array<size_t, 8> actions{2, 3, 1, 17, 4, 6, 0, 7};
       for (size_t i = 0; i < actions.size(); ++i) move(buttons_[actions[i]], browser.functions[i]);
     }
     move(buttons_[15], top.reload); ShowControl(buttons_[15], true);
@@ -2366,7 +2632,7 @@ class Host {
     move(buttons_[0], top.profile); move(buttons_[12], top.minimize);
     move(buttons_[13], top.maximize); move(buttons_[14], top.close);
     const int rail_x = layout.content.rail.x + px(4), rail_top = layout.content.rail.y;
-    const std::array<size_t, 5> rail_buttons{6, 2, 1, 3, 4};
+    const std::array<size_t, 6> rail_buttons{6, 2, 1, 3, 17, 4};
     if (!browser_layout_) {
       for (size_t row = 0; row < rail_buttons.size(); ++row)
         move(buttons_[rail_buttons[row]], {rail_x, rail_top + px(4 + static_cast<int>(row) * 44), px(40), px(40)});
@@ -2531,6 +2797,114 @@ class Host {
     SetWindowTextW(window_, title.c_str());
     SetWindowTextW(buttons_[0], title.c_str());
   }
+  gbrowser::webview::transfer::JsonObject ProfileSnapshot() {
+    using namespace gbrowser::webview;
+    using namespace winrt::Windows::Data::Json;
+    if (!shortcut_file_ || !loading_display_file_ || !cache_setting_)
+      throw std::runtime_error("存在不可读配置，不能导出不完整的资料");
+    SaveLayout(true); SaveTarouPlacement(); SavePanes();
+    JsonObject document, settings;
+    document.Insert(L"version", JsonValue::CreateNumberValue(1));
+    document.Insert(L"name", JsonValue::CreateStringValue(profiles_->Find(active_profile_).name));
+    auto put = [&](const wchar_t* name, const std::string& bytes) { settings.Insert(name, JsonValue::CreateStringValue(Utf8ToWide(bytes))); };
+    put(L"window-layout.state", EncodeWindowState(window_state_)); put(L"game-panes.state", EncodePaneState(panes_));
+    put(L"tarou-window.state", EncodeWindowState(tarou_window_state_));
+    put(L"appearance.state", EncodeDarkAppearance(theme_.dark()));
+    put(L"layout-choice.state", EncodeBrowserLayout(browser_layout_)); put(L"loading-display.state", EncodeHiddenLoading(hide_loading_));
+    put(L"static-cache.state", cache_enabled_ ? "STARRYFISH-CACHE-ON\n" : "STARRYFISH-CACHE-OFF\n");
+    put(L"shortcut-keys.state", characters::Encode(shortcut_keys_)); put(L"skill-overlay.state", skill_enabled_ ? "ON\n" : "OFF\n");
+    document.Insert(L"settings", settings); document.Insert(L"proxy", JsonValue::CreateStringValue(Utf8ToWide(EncodeProxyPreference(proxy_preference_->state()))));
+    return document;
+  }
+  void RunProfileTransfer(bool importing, gbrowser::webview::transfer::JsonObject document,
+      gbrowser::webview::transfer::BrowserTransfer::Done done) {
+    CancelCharacterSwitch(); character_tracker_ = {}; transfer_busy_ = true; EnableWindow(window_, FALSE);
+    try {
+    profile_transfer_ = std::make_unique<gbrowser::webview::transfer::BrowserTransfer>();
+    std::vector<std::string> pages; for (auto& page : pages_) pages.push_back(page->url());
+    if (!SetTimer(window_, 14, 120000, nullptr)) { transfer_busy_ = false; EnableWindow(window_, TRUE); throw std::runtime_error("无法启动迁移计时器"); }
+    profile_transfer_->Start(environment_.Get(), window_, pages, importing, document,
+      [this, done = std::move(done)](bool success, gbrowser::webview::transfer::JsonObject result) {
+        KillTimer(window_, 14); transfer_busy_ = false; character_tracker_ = {}; EnableWindow(window_, TRUE);
+        if (transfer_close_requested_) {
+          if (pending_profile_import && pending_profile_import->id == active_profile_ && !pending_profile_import->restored)
+            try { profiles_->Retire(active_profile_, pending_profile_import->previous); } catch (...) {}
+          pending_profile_import.reset(); Close(); return;
+        }
+        try { done(success, result); }
+        catch (...) { Notice(L"资料迁移未完成，原资料保留；请检查密码、文件名或运行时支持情况。"); }
+      });
+    } catch (...) {
+      KillTimer(window_, 14); transfer_busy_ = false; EnableWindow(window_, TRUE);
+      profile_transfer_.reset(); throw;
+    }
+  }
+  void TransferProfile(bool importing) {
+    using namespace gbrowser::webview;
+    using namespace winrt::Windows::Data::Json;
+    if (closing_ || failed_ || transfer_busy_ || loaded_ != 4) return;
+    transfer::Request request;
+    std::string created_profile;
+    const wchar_t* stage = L"选择文件与输入密码";
+    try {
+      transfer_busy_ = true;
+      const bool chosen = transfer::Choose(window_, importing, request);
+      transfer_busy_ = false; character_tracker_ = {};
+      if (!chosen) return;
+      if (importing) {
+        stage = L"读取资料文件";
+        const auto archive = transfer::ReadArchive(request.path);
+        stage = L"验证密码与文件完整性";
+        auto plain = transfer::Decrypt(archive, request.password);
+        SecureZeroMemory(request.password.data(), request.password.size() * sizeof(wchar_t)); request.password.clear();
+        stage = L"解析资料内容";
+        auto document = JsonObject::Parse(Utf8ToWide(plain)); SecureZeroMemory(plain.data(), plain.size());
+        document = transfer::ConfigurationOnly(document);
+        stage = L"新建资料并保存配置（密码已验证通过）";
+        const auto id = transfer::PrepareImport(*profiles_, installation_state_, profile_leaf_, active_profile_, document);
+        created_profile = id;
+        pending_profile_import = std::make_shared<PendingProfileImport>(PendingProfileImport{id, active_profile_, false, document});
+        next_profile_ = id; Close();
+      } else {
+        auto held = std::make_shared<transfer::Request>(std::move(request));
+        RunProfileTransfer(false, ProfileSnapshot(), [this, held](bool success, JsonObject document) {
+          try {
+            if (!success) throw std::runtime_error("存储读取未完成");
+            transfer::Validate(document);
+            auto plain = WideToUtf8(std::wstring(document.Stringify()));
+            auto encrypted = transfer::Encrypt(plain, held->password); SecureZeroMemory(plain.data(), plain.size());
+            transfer::WriteArchive(held->path, encrypted);
+            Notice(L"当前资料已导出为加密文件，包含布局、快捷键、扩展配置、书签和 Cookie。请单独保存密码。");
+          } catch (...) { Notice(L"导出未完成；不会覆盖已有文件。请检查新文件名和存储接口支持情况。"); }
+          SecureZeroMemory(held->password.data(), held->password.size() * sizeof(wchar_t)); held->password.clear();
+        });
+      }
+    } catch (...) {
+      transfer_busy_ = false; character_tracker_ = {};
+      if (!created_profile.empty()) try { profiles_->Retire(created_profile, active_profile_); } catch (...) {}
+      SecureZeroMemory(request.password.data(), request.password.size() * sizeof(wchar_t));
+      const auto message = std::wstring(L"资料迁移未完成。失败阶段：") + stage + L"。\n现有资料保留。";
+      Notice(message.c_str());
+    }
+  }
+  void RestoreProfile() {
+    auto pending = pending_profile_import;
+    RunProfileTransfer(true, pending->document, [this, pending](bool success, gbrowser::webview::transfer::JsonObject) {
+      if (success) {
+        // Close the browser process to discard extension worker caches. The next
+        // startup activates the imported profile only after normal verification.
+        pending->restored = true; next_profile_ = active_profile_;
+        Notice(L"配置已恢复。此次未迁移登录态，请在重新打开后登录游戏。原资料保留。");
+      } else {
+        pending_profile_import.reset();
+        profiles_->Retire(active_profile_, pending->previous);
+        next_profile_ = pending->previous;
+        const auto message = std::wstring(L"导入未完成。失败阶段：") + profile_transfer_->Failure() + L"。\n正在返回原资料。新建的导入资料保留供排查，原资料未改变。";
+        MessageBoxW(window_, message.c_str(), L"StarryFish", MB_OK | MB_ICONWARNING);
+      }
+      Close();
+    });
+  }
   void OpenProfiles() {
     if (closing_ || failed_ || loaded_ != 4) { Notice(L"请等待资料启动完成后切换"); return; }
     CancelSplit(); tab_close_.Cancel();
@@ -2539,15 +2913,37 @@ class Host {
       if (!profile_dialog_) profile_dialog_ = std::make_unique<gbrowser::webview::ProfileDialog>(
           *profiles_, active_profile_, theme_, [this](std::string id) {
             profiles_->Find(id); next_profile_ = std::move(id); Close();
-          });
+          }, [this](bool importing) { TransferProfile(importing); });
       profile_dialog_->Open(window_);
     } catch (...) { Notice(L"资料窗口未打开；现有资料和代理保留"); }
   }
   void Action(int id) {
-    if (closing_) return;
+    if (closing_ || transfer_busy_) return;
+    if (id == kCharacterKeys) {
+      CancelCharacterSwitch();
+      if (!shortcut_dialog_) shortcut_dialog_ = std::make_unique<gbrowser::webview::ShortcutDialog>(theme_,
+          [this](const gbrowser::webview::characters::Bindings& keys, bool enabled) {
+            if (!shortcut_file_) throw std::runtime_error("原快捷键配置不可读取，已保留原文件；无法保存");
+            RAWINPUTDEVICE keyboard{0x01, 0x06, enabled ? 0u : RIDEV_REMOVE, enabled ? window_ : nullptr};
+            if (enabled != character_enabled_ && !RegisterRawInputDevices(&keyboard, 1, sizeof(keyboard)))
+              throw std::runtime_error("无法启用键盘输入");
+            auto saved_keys=keys; saved_keys.master=enabled;
+            try { shortcut_file_->Save(gbrowser::webview::characters::Encode(saved_keys)); }
+            catch (...) {
+              keyboard.dwFlags = character_enabled_ ? 0u : RIDEV_REMOVE; keyboard.hwndTarget = character_enabled_ ? window_ : nullptr;
+              RegisterRawInputDevices(&keyboard, 1, sizeof(keyboard)); throw;
+            }
+            shortcut_keys_ = saved_keys; character_enabled_ = enabled; character_tracker_ = {}; CancelCharacterSwitch();
+            for (size_t key = 0; key < character_tracker_.down.size(); ++key)
+              character_tracker_.down[key] = (GetAsyncKeyState(static_cast<int>(key)) & 0x8000) != 0;
+            InvalidateRect(buttons_[17], nullptr, TRUE);
+          });
+      shortcut_dialog_->Open(window_, shortcut_keys_, character_enabled_); return;
+    }
     if (id == kSkillCooldown) {
       if (!skill_enabled_ && (failed_ || loaded_ != 4)) return;
       if (!skill_overlay_) skill_overlay_ = std::make_unique<gbrowser::webview::cooldown::Overlay>(window_, theme_, kSkillCooldown);
+      gbrowser::webview::UserStateFile(settings_root_ / L"skill-overlay.state").Save(skill_enabled_ ? "OFF\n" : "ON\n");
       skill_enabled_ = !skill_enabled_;
       for (size_t index = 0; index < capture_observers_.size(); ++index) ConfigureCooldown(index);
       RefreshCooldown(); return;
@@ -2792,7 +3188,14 @@ class Host {
   }
   void Close() {
     if (closing_) { Drain(); return; }
+    if (transfer_busy_) { transfer_close_requested_ = true; if (profile_transfer_) profile_transfer_->Cancel(); return; }
     dual_transition_.Cancel();
+    CancelCharacterSwitch();
+    if (character_enabled_) {
+      RAWINPUTDEVICE keyboard{0x01, 0x06, RIDEV_REMOVE, nullptr};
+      RegisterRawInputDevices(&keyboard, 1, sizeof(keyboard));
+    }
+    character_enabled_ = false;
     timings_.Mark("normal-close-requested");
     CancelSplit(); SaveLayout(true); SaveTarouPlacement(); SavePanes();
     closing_ = true; cache_stopping_ = true; // Block reentrant Drain until setup completes.
@@ -2805,6 +3208,7 @@ class Host {
     capture_server_.reset(); capture_.Clear();
     for (auto& observer : capture_observers_) observer.reset();
     KillTimer(window_, 9);
+    if (shortcut_dialog_) shortcut_dialog_->Close();
     if (profile_dialog_) profile_dialog_->Close();
     proxy_verified_ = false; ++cache_network_epoch_; ++cache_epoch_;
     for (auto& pair : cache_pending_) {
@@ -3114,15 +3518,15 @@ class Host {
   }
   void PaintButton(const DRAWITEMSTRUCT& draw) const {
     using gbrowser::webview::UiIcon;
-    const std::array<UiIcon, 17> icons{UiIcon::Profile, UiIcon::Proxy, UiIcon::Tarou, UiIcon::Arcarum,
+    const std::array<UiIcon, 18> icons{UiIcon::Profile, UiIcon::Proxy, UiIcon::Tarou, UiIcon::Arcarum,
         UiIcon::Dual, UiIcon::Copy, UiIcon::Components, UiIcon::More, UiIcon::Arrow, UiIcon::Detach, UiIcon::Close, UiIcon::Detach,
         UiIcon::Minimize, IsZoomed(window_) ? UiIcon::Restore : UiIcon::Maximize, UiIcon::Close,
-        UiIcon::Reload, UiIcon::Plus};
+        UiIcon::Reload, UiIcon::Plus, UiIcon::Keyboard};
     const auto found = std::find(buttons_.begin(), buttons_.end(), draw.hwndItem);
     if (found == buttons_.end()) { theme_.Button(draw, font_, UiIcon::Detach); return; }
     const auto i = static_cast<size_t>(found - buttons_.begin());
     const bool selected = (i == 2 && panes_.tarou) || (i == 3 && panes_.arcarum) || (i == 4 && panes_.dual) ||
-        (i == 11 && panes_.tarou_detached);
+        (i == 11 && panes_.tarou_detached) || (i == 17 && character_enabled_);
     const bool profile_icon_only = i == 0 && draw.rcItem.right - draw.rcItem.left < UiPixels(80, Dpi());
     theme_.Button(draw, font_, icons[i], false, selected, i != 0 || profile_icon_only, 0, i != 8);
   }
@@ -3353,8 +3757,21 @@ class Host {
     }
     if (message == WM_ENABLE && wparam) host->Guard([&] { host->RefreshProfileTitle(); });
     if (message == WM_CLOSE) { host->Close(); return 0; }
+    if (message == WM_ACTIVATEAPP) {
+      host->CancelCharacterSwitch(); host->character_tracker_.modifier_candidate = 0;
+      if (wparam && host->character_enabled_) {
+        for (size_t key = 0; key < host->character_tracker_.down.size(); ++key)
+          host->character_tracker_.down[key] = (GetAsyncKeyState(static_cast<int>(key)) & 0x8000) != 0;
+      }
+    }
+    if (message == WM_INPUT) {
+      host->CharacterKeyboardInput(reinterpret_cast<HRAWINPUT>(lparam));
+      return DefWindowProcW(window, message, wparam, lparam); // release foreground input resources
+    }
     if (message == WM_TIMER) {
+      if (wparam == 14) { KillTimer(window, 14); if (host->profile_transfer_) host->profile_transfer_->Cancel(); return 0; }
       if (wparam == kShutdownTimer) host->Drain();
+      if (wparam == kCharacterTimer) host->PollCharacterSwitch();
       if (wparam == 9) host->CaptureTick();
       if (wparam == 8) host->Guard([&] { host->ResumeLogin(); });
       if (wparam == 6) host->CompleteCacheJobs();
@@ -3428,12 +3845,17 @@ class Host {
     });
   }
   void RefreshCooldown() {
+    if (!skill_overlay_ && skill_enabled_ && window_ && !closing_) skill_overlay_ = std::make_unique<gbrowser::webview::cooldown::Overlay>(window_, theme_, kSkillCooldown);
     if (!skill_overlay_) return;
     if ((skill_view_ == kLeftGame && !panes_.dual) || (skill_view_ != kLeftGame && skill_view_ != active_))
       skill_view_ = gbrowser::webview::GameSurface(active_) ? active_ : 0;
     skill_overlay_->Update(skill_snapshots_[skill_view_], skill_view_ == kLeftGame);
     skill_overlay_->Align(skill_enabled_ && !closing_ && !failed_);
   }
+  std::filesystem::path settings_root_;
+  std::wstring profile_leaf_;
+  std::unique_ptr<gbrowser::webview::transfer::BrowserTransfer> profile_transfer_;
+  bool transfer_busy_ = false, transfer_close_requested_ = false;
   bool skill_enabled_ = false;
   size_t skill_view_ = 0;
   std::unique_ptr<gbrowser::webview::cooldown::Overlay> skill_overlay_;
@@ -3477,7 +3899,7 @@ class Host {
   HWND tabs_ = nullptr, tabs_tip_ = nullptr, divider_ = nullptr;
   int tooltip_tab_ = -1;
   HFONT font_ = nullptr;
-  std::array<HWND, 17> buttons_{};
+  std::array<HWND, 18> buttons_{};
   HANDLE browser_process_ = nullptr;
   UINT32 browser_pid_ = 0;
   std::unique_ptr<gbrowser::webview::ProxyPreference> proxy_preference_;

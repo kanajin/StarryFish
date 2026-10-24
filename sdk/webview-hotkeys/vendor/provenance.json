@@ -1,0 +1,18 @@
+{
+  "vendor/character_shortcuts.h": {
+    "source": "hosts/webview2/src/character_shortcuts.h",
+    "sha256": "f30a9bef87025ca716cc657984e0bd393001c5970709c01f1a4089f682b53427"
+  },
+  "vendor/character_shortcuts.js": {
+    "source": "hosts/webview2/src/character_shortcuts.js",
+    "sha256": "01c8e4079953883e100533fd26d91b334e892b59c2c8edb833e4cb8093baa619"
+  },
+  "checks/character_shortcuts.cjs": {
+    "source": "hosts/webview2/checks/character_shortcuts.cjs",
+    "sha256": "7c44999f0d92197b099c039347a082ba5acf0f5b144e21fc833bd4024032adb5"
+  },
+  "LICENSE": {
+    "source": "LICENSE",
+    "sha256": "7a8915386fb61dd2ef39d58beab77e6a00d7e8e62a3adfb10ac004af24047e71"
+  }
+}

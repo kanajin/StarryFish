@@ -26,6 +26,8 @@
 void RunResourceCacheChecks(const std::filesystem::path& root);
 void RunDualTransitionChecks();
 void RunShutdownChecks();
+void RunCharacterShortcutChecks();
+void RunProfileTransferChecks(const std::filesystem::path& root);
 
 namespace {
 void Require(bool value, const char* message) { if (!value) throw std::runtime_error(message); }
@@ -59,6 +61,7 @@ int wmain(int argc, wchar_t** argv) {
     Require(argc == 2, "one isolated test directory required");
     RunDualTransitionChecks();
     RunShutdownChecks();
+    RunCharacterShortcutChecks();
     {
       using gbrowser::webview::LoginResume;
       using gbrowser::webview::LoginResumeEntry;
@@ -571,6 +574,7 @@ int wmain(int argc, wchar_t** argv) {
             "must use a new empty temporary directory");
     gbrowser::webview::capture::RunCaptureChecks();
     RunResourceCacheChecks(root);
+    RunProfileTransferChecks(root);
     {
       const auto path = root / L"layout.state";
       gbrowser::webview::UserStateFile state(path);

@@ -10,7 +10,7 @@ namespace gbrowser::webview {
 // WebView2 callbacks alive. It never reads browser databases or accepts paths.
 class ProfileDialog {
  public:
-  ProfileDialog(ProfileCatalogue& catalogue, std::string active, UiTheme& theme, std::function<void(std::string)> select);
+  ProfileDialog(ProfileCatalogue& catalogue, std::string active, UiTheme& theme, std::function<void(std::string)> select, std::function<void(bool)> transfer);
   ~ProfileDialog();
   void Open(HWND owner);
   void Close();
@@ -26,9 +26,10 @@ class ProfileDialog {
   UiTheme& theme_;
   std::string active_;
   std::function<void(std::string)> select_;
+  std::function<void(bool)> transfer_;
   HWND window_ = nullptr, owner_ = nullptr, list_ = nullptr, name_ = nullptr, hint_ = nullptr;
   HFONT font_ = nullptr;
-  std::array<HWND, 7> buttons_{};
+  std::array<HWND, 9> buttons_{};
   std::vector<std::string> rows_;
   bool recycled_ = false;
 };

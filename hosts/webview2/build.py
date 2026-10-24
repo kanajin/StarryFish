@@ -78,6 +78,7 @@ def fingerprint_inputs():
 
 def verify():
     record = json.loads((BUILD / 'build-receipt.json').read_text())
+    package.require(sha(BUILD / 'native/Release/ProfileTransferRuntimeChecks.exe') == record['profile_transfer_checks_sha256'], 'migration runtime check identity changed')
     package.require(record['inputs'] == fingerprint_inputs(), 'native candidate inputs changed; rebuild required')
     package.require(sha(BUILD / 'native/Release/StarryFish.exe') == record['executable_sha256'],
                     'native executable identity changed')
@@ -152,6 +153,7 @@ def test():
     subprocess.run([node, str(ROOT / 'checks/proxy_profiles.cjs')], check=True)
     subprocess.run([node, str(ROOT / 'checks/loading_display.cjs')], check=True)
     subprocess.run([node, str(ROOT / 'checks/login_resume.cjs')], check=True)
+    subprocess.run([node, str(ROOT / 'checks/character_shortcuts.cjs')], check=True)
     subprocess.run([node, str(APP / 'tests/proxy_initialization_js_tests.cjs')], check=True)
     directory = tempfile.mkdtemp(prefix='directory-check-', dir=BUILD)
     subprocess.run([str(BUILD / 'native/Release/NativeSourceChecks.exe'), directory], check=True)
@@ -377,6 +379,7 @@ def generate_scripts():
                'kTargetScript': ROOT / 'src/target_binding.js', 'kGameUiScript': ROOT / 'src/game_ui.js',
                'kArcarumBindingScript': ROOT / 'src/arcarum_binding.js', 'kPanePointerScript': ROOT / 'src/pane_pointer.js',
                'kGameRoleScript': ROOT / 'src/game_role.js',
+               'kCharacterShortcutScript': ROOT / 'src/character_shortcuts.js',
                'kLoadingDisplayScript': ROOT / 'src/loading_display.js'}
     header = '#pragma once\n'
     for name, path in scripts.items():
@@ -416,7 +419,7 @@ def build():
     log = BUILD / ('build-' + stamp + '.log')
     with log.open('x', encoding='utf-8') as output:
         for command in ([str(cmake), '-S', str(ROOT), '-B', str(BUILD / 'native'), '-G',
-                         'Visual Studio 17 2022', '-A', 'x64', '-DGBROWSER_HOST_FINGERPRINT=' + fingerprint],
+                         'Visual Studio 17 2022', '-A', 'x64', '-DGBROWSER_HOST_FINGERPRINT=' + fingerprint, '-DGBROWSER_GENERATED_DIR=' + str(BUILD / 'generated')],
                         [str(cmake), '--build', str(BUILD / 'native'), '--config', 'Release']):
             subprocess.run(command, env=environment, stdout=output, stderr=subprocess.STDOUT, check=True)
         setup_inputs = compile_setup(fingerprint, output)
@@ -427,6 +430,7 @@ def build():
     executable = BUILD / 'native/Release/StarryFish.exe'
     record = {'status': 'COMPILED_NOT_RUNTIME_ACCEPTANCE', 'input_fingerprint': fingerprint,
               'inputs': before, 'executable_sha256': sha(executable), 'cef_migration': 'NOT_PERFORMED',
+              'profile_transfer_checks_sha256': sha(BUILD / 'native/Release/ProfileTransferRuntimeChecks.exe'),
               'source_checks_sha256': sha(BUILD / 'native/Release/NativeSourceChecks.exe'),
               'ui_preview_sha256': sha(BUILD / 'native/Release/UiThemePreview.exe'),
               'setup_sha256': sha(BUILD / 'setup/StarryFishSetup.exe'),
@@ -440,12 +444,26 @@ def build():
     print('Component payload:', payload)
 
 
+def test_profile_transfer_runtime():
+    verify()
+    directory = tempfile.mkdtemp(prefix='starryfish-transfer-synthetic-')
+    print('Synthetic runtime evidence:', directory, flush=True)
+    subprocess.run([str(BUILD / 'native/Release/ProfileTransferRuntimeChecks.exe'), directory], check=True, timeout=300)
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
-    parser.add_argument('command', choices=('build', 'test', 'verify', 'package', 'package-setup'))
+    parser.add_argument('command', choices=('build', 'test', 'verify', 'package', 'package-setup', 'test-profile-transfer-runtime'))
+    parser.add_argument('--build-dir', default='.build', help='Isolated build directory directly under this host')
     args = parser.parse_args()
+    if not args.build_dir.startswith('.build') or Path(args.build_dir).name != args.build_dir or '/' in args.build_dir or '\\' in args.build_dir:
+        parser.error('build-dir must be a .build-prefixed directory name')
+    BUILD = ROOT / args.build_dir
+    publication_path = BUILD.resolve()
+    if publication_path.parent != ROOT.resolve():
+        parser.error('build-dir must remain under the host')
     try:
-        {'build': build, 'test': test, 'verify': verify, 'package': package_candidate, 'package-setup': package_setup}[args.command]()
+        {'build': build, 'test': test, 'verify': verify, 'package': package_candidate, 'package-setup': package_setup, 'test-profile-transfer-runtime': test_profile_transfer_runtime}[args.command]()
     except (ValueError, OSError, subprocess.CalledProcessError) as error:
         print('STOP:', error, file=sys.stderr)
         sys.exit(1)

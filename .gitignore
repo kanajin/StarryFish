@@ -13,3 +13,6 @@ Validation/
 GbfValidation/
 **/Cache/Static-v1/
 dist/
+
+# Isolated local build candidates; retain on disk, never stage their payloads.
+**/.build-*/

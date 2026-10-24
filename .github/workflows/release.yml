@@ -38,6 +38,14 @@ jobs:
           py -3.12 -B build.py verify
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           py -3.12 -B build.py package-setup
+      - name: Build and test WebView-only SDK
+        working-directory: sdk/webview-hotkeys
+        run: |
+          py -3.12 -B build.py build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          py -3.12 -B build.py test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          dotnet build examples/dotnet/GbfHotkeys.csproj -c Release
       - name: Create release archives and checksums
         env:
           RELEASE_REF: ${{ github.ref_name }}

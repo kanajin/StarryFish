@@ -2,6 +2,7 @@
 #include "compact_chrome.h"
 #include "convenience_layout.h"
 #include "skill_overlay.h"
+#include "shortcut_dialog.h"
 #include <iostream>
 #include <stdexcept>
 #include <cmath>
@@ -90,7 +91,7 @@ int wmain(int argc,wchar_t** argv) {
       const auto bounds=[](gbrowser::Rect r) {return RECT{r.x,r.y,r.x+r.width,r.y+r.height};};
       auto top=ToolbarGeometry(scale(1100),dpi,2);
       const auto browser=BrowserToolbarGeometry(scale(1100),dpi,2);
-      if(browser_layout) top={browser.address,browser.copy,browser.tabs,browser.functions[5],browser.minimize,browser.maximize,browser.close,browser.add,browser.reload};
+      if(browser_layout) top={browser.address,browser.copy,browser.tabs,browser.functions[6],browser.minimize,browser.maximize,browser.close,browser.add,browser.reload};
       theme.Round(dc,bounds(top.address),scale(9),c.surface,c.border);
       auto address=bounds(top.address);InflateRect(&address,-scale(8),0);
       theme.Text(dc,font,L"game.granbluefantasy.jp",address,c.ink,DT_LEFT);
@@ -112,13 +113,13 @@ int wmain(int argc,wchar_t** argv) {
         DRAWITEMSTRUCT draw{};draw.CtlType=ODT_BUTTON;draw.hwndItem=w;draw.hDC=dc;draw.rcItem=bounds(rect);
         theme.Button(draw,font,icon,false,selected,only,dpi,flat);DestroyWindow(w);
       };
-      const std::array<UiIcon,5> icons{UiIcon::Components,UiIcon::Tarou,UiIcon::Proxy,UiIcon::Arcarum,UiIcon::Dual};
+      const std::array<UiIcon,6> icons{UiIcon::Components,UiIcon::Tarou,UiIcon::Proxy,UiIcon::Arcarum,UiIcon::Keyboard,UiIcon::Dual};
       if(browser_layout) {
-        const std::array<UiIcon,7> actions{UiIcon::Tarou,UiIcon::Arcarum,UiIcon::Proxy,UiIcon::Dual,UiIcon::Components,UiIcon::Profile,UiIcon::More};
-        for(size_t i=0;i<actions.size();++i) button(L"",actions[i],browser.functions[i],i==0||i==3);
+        const std::array<UiIcon,8> actions{UiIcon::Tarou,UiIcon::Arcarum,UiIcon::Proxy,UiIcon::Keyboard,UiIcon::Dual,UiIcon::Components,UiIcon::Profile,UiIcon::More};
+        for(size_t i=0;i<actions.size();++i) button(L"",actions[i],browser.functions[i],i==0||i==4);
       } else {
         for(size_t i=0;i<icons.size();++i)
-          button(L"",icons[i],{panes.chrome.content.rail.x+scale(4),scale(48+static_cast<int>(i)*44),scale(40),scale(40)},i==1||i==4);
+          button(L"",icons[i],{panes.chrome.content.rail.x+scale(4),scale(48+static_cast<int>(i)*44),scale(40),scale(40)},i==1||i==5);
         button(L"更多",UiIcon::More,{scale(1056),scale(590),scale(40),scale(40)});
         button(L"StarryFish · 默认资料",UiIcon::Profile,top.profile,false,false);
       }
@@ -198,7 +199,13 @@ int wmain(int argc,wchar_t** argv) {
     {
       cooldown::Overlay overlay(owner, theme, 142);
       overlay.Update(cooldown::Snapshot{}, true); overlay.Align(true);
-      const auto floating = FindWindowW(L"StarryFish.SkillCooldown", nullptr);
+      // A live browser may have an overlay with the same class. Select only
+      // this fixture's owner; never inspect or close another instance's UI.
+      HWND floating = nullptr;
+      for (HWND candidate = FindWindowExW(nullptr, nullptr, L"StarryFish.SkillCooldown", nullptr); candidate;
+          candidate = FindWindowExW(nullptr, candidate, L"StarryFish.SkillCooldown", nullptr)) {
+        if (GetWindow(candidate, GW_OWNER) == owner) { floating = candidate; break; }
+      }
       Require(floating && GetWindow(floating, GW_OWNER) == owner && !IsWindowVisible(floating),
           "CD overlay ownership/hidden owner boundary failed");
       const auto style = GetWindowLongPtrW(floating, GWL_EXSTYLE);
@@ -208,6 +215,52 @@ int wmain(int argc,wchar_t** argv) {
       MSG close{};
       Require(PeekMessageW(&close, owner, WM_COMMAND, WM_COMMAND, PM_REMOVE) && LOWORD(close.wParam) == 142,
           "CD close bypassed shared menu toggle");
+    }
+    for (bool dark : {false, true}) {
+      theme.SetDark(dark);
+      bool saved = false;
+      ShortcutDialog dialog(theme, [&](const characters::Bindings& keys, bool enabled) {
+        saved = keys[0] == 'X' && enabled && !keys.enabled[8];
+      });
+      dialog.Open(owner, characters::Defaults(), false);
+      Require(dialog.window() && !IsWindowVisible(dialog.window()) && GetWindow(dialog.window(), GW_OWNER) == owner,
+          "shortcut fixture must remain hidden and owned");
+      SendMessageW(dialog.window(), WM_COMMAND, MAKEWPARAM(111, BN_CLICKED), 0);
+      SendMessageW(dialog.window(), WM_COMMAND, MAKEWPARAM(200, BN_CLICKED), 0);
+      MSG key{}; key.hwnd = GetDlgItem(dialog.window(), 200); key.message = WM_KEYDOWN; key.wParam = 'X';
+      Require(dialog.Translate(key), "shortcut recorder ignored key");
+      SendMessageW(dialog.window(), WM_COMMAND, MAKEWPARAM(100, BN_CLICKED), 0);
+      SendMessageW(dialog.window(), WM_COMMAND, MAKEWPARAM(408, BN_CLICKED), 0);
+      for (int group=0; group<4; ++group) {
+      SendMessageW(dialog.window(), WM_COMMAND, MAKEWPARAM(110+group, BN_CLICKED), 0);
+      RECT client{}; GetClientRect(dialog.window(), &client);
+      // The real hidden window uses the monitor DPI, independent of the
+      // toolbar fixture's requested DPI. Give it its own exact-sized bitmap.
+      HDC dialog_dc = CreateCompatibleDC(dc);
+      BITMAPINFO dialog_info{}; dialog_info.bmiHeader = {sizeof(BITMAPINFOHEADER),client.right,-client.bottom,1,32,BI_RGB,0,0,0,0,0};
+      void* dialog_bits = nullptr;
+      HBITMAP dialog_bitmap = CreateDIBSection(dc,&dialog_info,DIB_RGB_COLORS,&dialog_bits,nullptr,0);
+      Require(dialog_dc && dialog_bitmap, "cannot allocate shortcut preview");
+      const auto dialog_old = SelectObject(dialog_dc,dialog_bitmap);
+      theme.Background(dialog_dc,client);
+      for (HWND child=GetWindow(dialog.window(),GW_CHILD); child; child=GetWindow(child,GW_HWNDNEXT)) {
+        if (!(GetWindowLongPtrW(child,GWL_STYLE)&WS_VISIBLE)) continue;
+        RECT bounds{};GetWindowRect(child,&bounds);MapWindowPoints(nullptr,dialog.window(),reinterpret_cast<POINT*>(&bounds),2);
+        Require(bounds.left>=0 && bounds.top>=0 && bounds.right<=client.right && bounds.bottom<=client.bottom,"shortcut control clipped");
+        const int dc_state=SaveDC(dialog_dc);SetViewportOrgEx(dialog_dc,bounds.left,bounds.top,nullptr);
+        IntersectClipRect(dialog_dc,0,0,bounds.right-bounds.left,bounds.bottom-bounds.top);
+        SendMessageW(child,WM_PRINT,reinterpret_cast<WPARAM>(dialog_dc),PRF_CLIENT|PRF_ERASEBKGND);
+        RestoreDC(dialog_dc,dc_state);
+      }
+      {
+        Gdiplus::Bitmap shot(dialog_bitmap, nullptr);
+        Require(shot.Save((output/(std::wstring(dark?L"shortcuts-dark-":L"shortcuts-light-")+std::to_wstring(group)+L".png")).c_str(), &png, nullptr)==Gdiplus::Ok,
+            "cannot save shortcut dialog preview");
+      }
+      SelectObject(dialog_dc,dialog_old); DeleteObject(dialog_bitmap); DeleteDC(dialog_dc);
+      }
+      SendMessageW(dialog.window(), WM_COMMAND, MAKEWPARAM(102, BN_CLICKED), 0);
+      Require(saved && !dialog.window(), "shortcut save did not close dialog");
     }
     SelectObject(dc,old);DeleteObject(bitmap);DeleteDC(dc);DeleteObject(font);DestroyWindow(owner);
     std::cout<<"PASS offscreen palettes; browser NOT_STARTED\n";return 0;

@@ -16,7 +16,7 @@
 #include <algorithm>
 
 namespace gbrowser::webview {
-enum class UiIcon { None, Profile, Proxy, Tarou, Arcarum, Dual, Copy, Components, More, Arrow, Detach, Close, Minimize, Maximize, Restore, Reload, Plus, Page };
+enum class UiIcon { None, Profile, Proxy, Tarou, Arcarum, Dual, Copy, Components, More, Arrow, Detach, Close, Minimize, Maximize, Restore, Reload, Plus, Page, Keyboard };
 struct UiPalette { COLORREF background, surface, hover, selected, ink, muted, accent, border; };
 inline UiPalette BluePalette(bool dark) {
   return dark ? UiPalette{RGB(23,37,64), RGB(32,50,80), RGB(16,29,52), RGB(49,78,119),
@@ -143,6 +143,9 @@ class UiTheme {
       case UiIcon::Close: line(6,6,18,18); line(18,6,6,18); break;
       case UiIcon::Reload: g.DrawArc(&pen,5.f,5.f,14.f,14.f,40.f,285.f); line(19,4,19,10); line(19,10,13,10); break;
       case UiIcon::Plus: line(5,12,19,12); line(12,5,12,19); break;
+      case UiIcon::Keyboard: g.DrawRectangle(&pen,2.f,5.f,20.f,14.f);
+        for (int y : {9, 12}) for (int x : {6, 10, 14, 18}) line(static_cast<float>(x),static_cast<float>(y),static_cast<float>(x)+1,static_cast<float>(y));
+        line(7,16,17,16); break;
       case UiIcon::Page: g.DrawEllipse(&pen,3.f,3.f,18.f,18.f); g.DrawEllipse(&pen,8.f,3.f,8.f,18.f);
         line(3,12,21,12); break;
       default: break;
