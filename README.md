@@ -1,6 +1,16 @@
+## [打开 StarryFish 功能说明页](https://htmlpreview.github.io/?https://github.com/kanajin/StarryFish/blob/main/features.html)
+
+面向玩家的图文说明，查看窗口、助手、快捷键与资料迁移功能。也可单独下载 [features.html](features.html)，直接在浏览器打开。
+
+[再开发交接目录](handover/README.md) · [给其他 AI 的接手说明](handover/AI_START_HERE.md)
+
+在线阅读使用 GitHub HTML Preview；fork 后请将预览链接中的仓库地址改为自己的地址。维护者目前不计划继续积极开发，后续本地修改也不保证上传。
+
 <p align="center"><img src="assets/starryfish.png" width="160" alt="StarryFish 蓝色小鱼"></p>
 
 # StarryFish
+
+Fork 后的开发入口：[再开发交接](handover/README.md)。
 
 **面向《碧蓝幻想》（GBF）的 Windows 专用轻量浏览器。**
 
@@ -73,6 +83,8 @@ python -B build.py test
 cd ../..
 python -B tools/package_release.py 0.1.12
 ```
+
+目前没有可用的 Linux 版本。未完成的本地移植实验不包含在公开源码中。
 
 依赖从官方固定 URL 获取并验证 SHA256。太郎/肉鸽固定快照仅用于构建检查；终端用户首装可解析上游最新版本，或选择两个本地 ZIP。包输出在 `dist/`。推送 `main` 会构建并保留检查产物，推送 `v*` 标签会额外发布 GitHub Release；工作流不会访问或上传本地用户资料。发布新版本前需同时更新 `VERSION` 与 `RELEASE_NOTES.md`，标签版本必须与 `VERSION` 一致。
 
