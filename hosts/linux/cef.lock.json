@@ -1,4 +1,16 @@
 {
   "schema": 1,
-  "cef": null
+  "cef": {
+    "schema": 1,
+    "platform": "linux64",
+    "channel": "stable",
+    "type": "standard",
+    "version": "156.0.14+g4fa4ab5+chromium-156.0.8078.48",
+    "archive": "cef_binary_156.0.14+g4fa4ab5+chromium-156.0.8078.48_linux64.tar.bz2",
+    "url": "https://cef-builds.spotifycdn.com/cef_binary_156.0.14%2Bg4fa4ab5%2Bchromium-156.0.8078.48_linux64.tar.bz2",
+    "size": 695590857,
+    "upstream_sha1": "6dd0cbe37530f670adeca7d93ae718887122b511",
+    "root": "cef_binary_156.0.14+g4fa4ab5+chromium-156.0.8078.48_linux64",
+    "sha256": "5e13331b53cf6b7d6e1de4b2530ff31d2148f3740a10956c1466aef006c17307"
+  }
 }
