@@ -2,7 +2,7 @@
 
 目标为 **CachyOS x86_64、KDE Plasma Wayland 桌面、XWayland**。CEF Views + Alloy style 保留 StarryFish 自定义外观；现代 CEF 使用 Chrome bootstrap。Linux 与 Windows WebView2 为独立宿主，不直接链接带 Win32 依赖的 app/ 目标。
 
-**当前是移植基线，不是日用版本。** 已有构建入口、依赖锁定机制、XDG 路径、资料锁、原子写入和 CEF 启动骨架的源码。尚未在 Linux 编译或运行；只有 Python 构建工具的隔离检查已通过。标签、双窗、主题、代理、助手、网页适配、快捷键、MCP、资料迁移和安装均未交付。完整范围与验收顺序见 [移植计划](PORTING_PLAN.md)。
+**当前是移植基线，不是日用版本。** 已在 CachyOS 完成首次 Linux 编译、原生隔离检查和文件身份核验，并运行了全新 XDG 目录中的空白页、GPU 与沙箱诊断。资料锁和正常退出已观察，Chromium 报告 namespace/seccomp 沙箱及硬件加速；中文输入和页面缩放已有用户确认，KDE 系统缩放切换仍待验证。标签、双窗、主题、代理、助手、网页适配、游戏快捷键、MCP、资料迁移和安装均未交付。完整范围与证据边界见 [移植计划](PORTING_PLAN.md)。
 
 ## 在 CachyOS 接续
 
@@ -19,11 +19,20 @@ python -B build.py test --portable
 
 doctor 不下载、不安装、不启动浏览器、不读取用户资料。它报告架构、构建工具、会话、X11 显示、GPU 设备存在性和 pkg-config 依赖；沙箱、GPU 实际渲染、缩放及输入始终需要运行验证。Windows 上返回非零是正常的平台不满足，不代表 Linux 已测试失败。
 
-构建需要 Python 3.10+、CMake 3.21+、Ninja、C++17 编译器及 CEF 所需的 Linux 系统开发库。KDE 会话须提供 DISPLAY、XWayland 和有效的 XDG_RUNTIME_DIR。XTest、OpenSSL、Secret Service 是后续输入/资料功能所需能力，当前不会因它们缺失而伪造成功或自动安装。
+构建需要 Python 3.10+、CMake 3.21+、Ninja、C/C++20 编译器及 CEF 所需的 Linux 系统开发库。KDE 会话须提供 DISPLAY、XWayland 和有效的 XDG_RUNTIME_DIR。XTest、OpenSSL、Secret Service 是后续输入/资料功能所需能力，当前不会因它们缺失而伪造成功或自动安装。
+
+本次主机未安装系统 CMake，已将官方 CMake 4.4.4 放在忽略的 `.deps/toolchain` 中；使用它的现有 checkout 可先执行：
+
+```sh
+export PATH="$PWD/.deps/toolchain/cmake-4.4.4-linux-x86_64/bin:$PATH"
+python -B build.py doctor
+```
+
+该工具来自 [Kitware 官方发行](https://github.com/Kitware/CMake/releases/tag/v4.4.4)，Linux x86_64 tar.gz 的 SHA-256 为 `e5bb807f7728cb60cd8b27ebc97a2edb469b68655f21e844a600c3575b76f5bb`。不提交工具包，不要求修改系统软件。受限开发执行器可能隐藏 GPU、阻止桌面连接或导致大文件解包异常；必须区分执行器和真实主机环境，不能据此修改 Chromium sandbox。
 
 ### 首次锁定 CEF
 
-当前 cef.lock.json 的 cef 为 null：这是明确的未配置状态，fetch/build 会拒绝继续。按两台机器接续方案，第一次依赖选择和下载在 CachyOS 完成，不在 Windows 下载一个无法验证的运行库。
+当前已锁定 `156.0.14+g4fa4ab5+chromium-156.0.8078.48`（stable/linux64/standard），完整摘要见 `cef.lock.json`。现有 checkout 直接执行 fetch；不要再次 lock 或隐式升级。以下步骤仅说明首次建立锁的流程，已有锁的升级必须单独审查。
 
 1. 从 [官方发行索引](https://cef-builds.spotifycdn.com/index.html) 选择 **stable / linux64 / standard** 的完整版本号。
 2. 显式传入该版本；以下占位值必须替换为实际完整版本。
@@ -69,7 +78,18 @@ XDG_RUNTIME_DIR="$sf_check_runtime" \
   .build/out/StarryFish --smoke-test
 ```
 
---smoke-test 只改变初始页面为 about:blank，不是断网模式，也不承诺 Chromium 没有背景网络活动。当前没有额外命令行开关；宿主强制 X11 后端，拒绝浏览器主进程的其他开关。正常入口会打开 GBF My Page，但当前不建议用它登录真实账号。
+--smoke-test 只改变初始页面为 about:blank，不是断网模式，也不承诺 Chromium 没有背景网络活动。宿主强制 X11 后端并禁用系统自动扩展加载。只额外接受互斥的 `--diagnostic-page=input|gpu|sandbox`，拒绝其他主进程开关及位置参数。正常入口会打开 GBF My Page，但当前不建议用它登录真实账号。
+
+可使用下列显式桌面检查入口。它先验证构建收据，每次新建私有 XDG 目录，在 `.build/smoke-*` 保留构建身份、启动记录、仅本次进程树的沙箱状态、退出结果和日志。不会读取已有资料，不会强杀或自动清理。完成后正常关闭对应窗口；Ctrl+C 只中断检查器，浏览器与证据保留。
+
+```sh
+python -B checks/run_desktop.py --page blank --check-lock
+python -B checks/run_desktop.py --page sandbox
+python -B checks/run_desktop.py --page gpu
+python -B checks/run_desktop.py --page input
+```
+
+GPU 页面使用 Shadow DOM，CEF 文本回读可能为空，应查看实际页面，不能把空文本当作 GPU 检查成功。中文检查只输入“星鱼中文测试”等合成内容，观察候选框、提交、删除及中英文切换；Ctrl+加号/减号调整网页缩放，Ctrl+0 恢复 100%，检查页标题显示倍率。页面缩放与 KDE 系统缩放是两项独立检查。这些诊断入口不开放远程调试端口，也没有网页到宿主的特权消息桥。
 
 分别记录窗口显示、关闭后所有本次子进程退出、第二实例资料锁、GPU 渲染、中文输入、缩放和沙箱实际状态。settings.no_sandbox=false 只是代码配置，不是运行验收。CachyOS 若不能正常启用 namespace sandbox，应保留诊断并停在该里程碑；不加 --no-sandbox、不自动提权、不修改系统策略。构建不会执行 SET_LINUX_SUID_PERMISSIONS。
 
@@ -88,7 +108,7 @@ Chromium profile 内的缓存仍由 Chromium 管理；独立静态缓存尚未�
 
 先读本目录 AGENTS.md、本页和 PORTING_PLAN.md，再读根目录 handover/DEVELOPMENT.md、docs/UI_REQUIREMENTS.md。公开 fork 可能不带原工作站的私人工作区交接，不需要寻找或复制用户资料。
 
-下一步依次执行：本机 doctor → 明确锁定 CEF → build/test/verify → 隔离空白页和沙箱验收 → 修复确认的基线问题 → 继续外壳与消息边界。每项填写代码、构建、隔离测试、用户反馈四种状态。不要直接跳到助手 ZIP 加载，也不要把窗口显示当作完整移植成功。
+接续时先核对已保留的证据及账本，避免重复已通过的流程。当前中文输入/页面缩放已获确认，下一步继续外壳与消息边界。每项分别填写代码、构建、隔离测试、真实运行和用户反馈状态。不要直接跳到助手 ZIP 加载，也不要把窗口显示当作完整移植成功。
 
 本分支仅发布源码。现有 Windows 发布工作流监听 main 和 v* 标签；不手动触发它，不为 Linux 修改产品版本或建立 Release。
 

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(StarryFishLinux LANGUAGES CXX)
+project(StarryFishLinux LANGUAGES C CXX)
 
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8
    OR NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
@@ -21,15 +21,20 @@ endif()
 
 list(APPEND CMAKE_MODULE_PATH "${CEF_ROOT}/cmake")
 find_package(CEF REQUIRED)
+# The sample's working-directory rpath is inappropriate for a real host.
+# Resolve bundled libraries only beside our executable, regardless of cwd.
+list(REMOVE_ITEM CEF_LINKER_FLAGS "-Wl,-rpath,.")
 add_subdirectory("${CEF_LIBCEF_DLL_WRAPPER_PATH}" libcef_dll_wrapper)
 ADD_LOGICAL_TARGET(libcef_lib "${CEF_LIB_DEBUG}" "${CEF_LIB_RELEASE}")
 SET_CEF_TARGET_OUT_DIR()
 
-add_executable(starryfish-linux src/main.cpp src/platform_paths.cpp)
+add_executable(starryfish-linux src/main.cpp src/platform_paths.cpp src/diagnostics.cpp)
 SET_EXECUTABLE_TARGET_PROPERTIES(starryfish-linux)
 add_dependencies(starryfish-linux libcef_dll_wrapper)
-target_compile_features(starryfish-linux PRIVATE cxx_std_17)
-target_compile_options(starryfish-linux PRIVATE -Wall -Wextra -Werror)
+target_compile_features(starryfish-linux PRIVATE cxx_std_20)
+# CEF's wrapper keeps its default no-exceptions policy. Our filesystem boundary
+# catches failures at main() and needs exceptions in this target only.
+target_compile_options(starryfish-linux PRIVATE -Wall -Wextra -Werror -fexceptions)
 target_compile_definitions(starryfish-linux PRIVATE CEF_USE_SANDBOX)
 target_link_libraries(starryfish-linux PRIVATE libcef_lib libcef_dll_wrapper ${CEF_STANDARD_LIBS})
 

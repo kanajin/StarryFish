@@ -5,13 +5,18 @@
 #include "include/cef_command_line.h"
 #include "include/cef_display_handler.h"
 #include "include/cef_life_span_handler.h"
+#include "include/cef_load_handler.h"
+#include "include/cef_keyboard_handler.h"
 #include "include/cef_request_context.h"
 #include "include/views/cef_browser_view.h"
 #include "include/views/cef_window.h"
 #include "include/wrapper/cef_helpers.h"
 #include "platform_paths.h"
+#include "diagnostics.h"
 
 #include <algorithm>
+#include <array>
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
@@ -23,10 +28,51 @@ constexpr char kHomeUrl[] = "https://game.granbluefantasy.jp/#mypage";
 
 class BrowserClient final : public CefClient,
                             public CefDisplayHandler,
+                            public CefLoadHandler,
+                            public CefKeyboardHandler,
                             public CefLifeSpanHandler {
  public:
   CefRefPtr<CefDisplayHandler> GetDisplayHandler() override { return this; }
   CefRefPtr<CefLifeSpanHandler> GetLifeSpanHandler() override { return this; }
+  CefRefPtr<CefLoadHandler> GetLoadHandler() override { return this; }
+  CefRefPtr<CefKeyboardHandler> GetKeyboardHandler() override { return this; }
+
+  bool OnPreKeyEvent(CefRefPtr<CefBrowser> browser, const CefKeyEvent& event,
+                     CefEventHandle, bool*) override {
+    // Browser zoom only. Game automation and synthetic input are not connected.
+    if (event.type != KEYEVENT_RAWKEYDOWN || !(event.modifiers & EVENTFLAG_CONTROL_DOWN) ||
+        (event.modifiers & (EVENTFLAG_ALT_DOWN | EVENTFLAG_COMMAND_DOWN))) return false;
+    const int key = event.windows_key_code;  // CEF's cross-platform virtual key.
+    const bool more = key == 187 || key == 107;  // OEM_PLUS / ADD
+    const bool less = key == 189 || key == 109;  // OEM_MINUS / SUBTRACT
+    if (!more && !less && key != '0') return false;
+    if ((event.modifiers & EVENTFLAG_SHIFT_DOWN) && !more) return false;
+    constexpr std::array<double, 12> scales{0.5, 0.67, 0.8, 0.9, 1.0, 1.1,
+                                          1.25, 1.5, 1.75, 2.0, 2.5, 3.0};
+    const double current = std::pow(1.2, browser->GetHost()->GetZoomLevel());
+    double target = 1.0;
+    if (more) {
+      const auto next = std::upper_bound(scales.begin(), scales.end(), current + 0.001);
+      target = next == scales.end() ? scales.back() : *next;
+    } else if (less) {
+      const auto next = std::lower_bound(scales.begin(), scales.end(), current - 0.001);
+      target = next == scales.begin() ? scales.front() : *std::prev(next);
+    }
+    browser->GetHost()->SetZoomLevel(std::log(target) / std::log(1.2));
+    if (CefCommandLine::GetGlobalCommandLine()->GetSwitchValue("diagnostic-page") == "input") {
+      const auto view = CefBrowserView::GetForBrowser(browser);
+      if (view && view->GetWindow())
+        view->GetWindow()->SetTitle("StarryFish 输入与缩放检查 — " +
+                                    std::to_string(static_cast<int>(std::lround(target * 100))) + "%");
+    }
+    return true;
+  }
+
+  void OnLoadingStateChange(CefRefPtr<CefBrowser> browser, bool loading,
+                            bool, bool) override {
+    if (!loading && CefCommandLine::GetGlobalCommandLine()->HasSwitch("diagnostic-page"))
+      starryfish::linux_host::ReportDiagnosticPage(browser);
+  }
 
   void OnAfterCreated(CefRefPtr<CefBrowser> browser) override {
     CEF_REQUIRE_UI_THREAD();
@@ -118,7 +164,13 @@ class StarryFishApp final : public CefApp,
 
   void OnBeforeCommandLineProcessing(const CefString& process_type,
                                      CefRefPtr<CefCommandLine> command_line) override {
-    if (process_type.empty()) command_line->AppendSwitchWithValue("ozone-platform", "x11");
+    if (process_type.empty()) {
+      command_line->AppendSwitchWithValue("ozone-platform", "x11");
+      // Chrome bootstrap otherwise discovers system-installed extensions and
+      // can start their native messaging hosts, even in a fresh XDG profile.
+      // Linux helpers will use explicitly reviewed host adapters instead.
+      command_line->AppendSwitch("disable-extensions");
+    }
   }
 
   CefRefPtr<CefBrowserProcessHandler> GetBrowserProcessHandler() override {
@@ -131,8 +183,11 @@ class StarryFishApp final : public CefApp,
     CEF_REQUIRE_UI_THREAD();
     CefBrowserSettings settings;
     const auto command = CefCommandLine::GetGlobalCommandLine();
+    const auto initial_url = command->HasSwitch("diagnostic-page")
+        ? starryfish::linux_host::DiagnosticUrl(command->GetSwitchValue("diagnostic-page"))
+        : (command->HasSwitch("smoke-test") ? "about:blank" : kHomeUrl);
     const auto view = CefBrowserView::CreateBrowserView(
-        client_, command->HasSwitch("smoke-test") ? "about:blank" : kHomeUrl, settings, nullptr, nullptr,
+        client_, initial_url, settings, nullptr, nullptr,
         new BrowserViewDelegate());
     CefWindow::CreateTopLevelWindow(new BrowserWindowDelegate(view));
   }
@@ -158,9 +213,16 @@ NO_STACK_PROTECTOR int main(int argc, char* argv[]) {
     command->InitFromArgv(argc, argv);
     CefCommandLine::SwitchMap switches;
     command->GetSwitches(switches);
+    CefCommandLine::ArgumentList arguments;
+    command->GetArguments(arguments);
+    if (!arguments.empty() || (command->HasSwitch("smoke-test") &&
+                              command->HasSwitch("diagnostic-page"))) return 2;
     for (const auto& option : switches) {
-      if (option.first != "smoke-test" || !option.second.empty()) {
-        std::cerr << "Only --smoke-test is supported by this development host\n";
+      const bool smoke = option.first == "smoke-test" && option.second.empty();
+      const bool diagnostic = option.first == "diagnostic-page" &&
+          (option.second == "input" || option.second == "gpu" || option.second == "sandbox");
+      if (!smoke && !diagnostic) {
+        std::cerr << "Supported: --smoke-test or --diagnostic-page=input|gpu|sandbox\n";
         return 2;
       }
     }

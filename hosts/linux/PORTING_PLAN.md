@@ -8,15 +8,33 @@
 
 | 交付项 | 代码 | 检查证据 | Linux / 用户实测 |
 |---|---|---|---|
-| doctor、显式 CEF lock/fetch、build/test/verify | 已实现 | Python 离线夹具通过 | 待 CachyOS 检查；CEF 尚未锁定 |
-| CEF Views Alloy / X11 启动骨架 | 已接线 | 静态检查，非 Linux 编译 | pending |
-| XDG 路径、私有目录、资料锁、原子写入 | 已接线／提供原语 | 已编写原生隔离测试，未执行 | pending |
+| doctor、显式 CEF lock/fetch、build/test/verify | 已实现，CEF 156 stable 已锁定 | 19 项 Python 检查、依赖与输出身份通过 | CachyOS 本机通过；受限执行器差异见下 |
+| CEF Views Alloy / X11 启动骨架 | 修复 C/C++20、异常及 rpath；禁用自动扩展 | 首次 Linux Release 编译通过，保留 -Werror 和 sandbox | 隔离窗口、正常退出、GPU 和 namespace/seccomp 已观察；用户验收 pending |
+| XDG 路径、私有目录、资料锁、原子写入 | 已接线／提供原语 | 原生 CTest 通过，含跨进程锁、硬链接和权限拒绝 | 第二实例拒绝、退出后进程清空已观察 |
+| 固定本地诊断页、网页缩放、合成桌面检查器 | 已实现 | 构建身份绑定，保留合成证据 | 中文输入和页面 100%/125%/150% 用户确认；KDE 缩放切换未测 |
 | 双布局、主题、标签、双窗与消息桥 | 未实现 | pending | pending |
 | 原生代理与 ZeroOmega 配置兼容 | 未实现 | pending | pending |
 | 太郎、肉鸽受限适配 | 未实现 | pending | pending |
 | 书签、汉化、菜单、历史与登录适配 | 未实现 | pending | pending |
 | 快捷键、CD 条、MCP、静态缓存 | 未实现 | pending | pending |
 | 加密资料迁移、下载、启动器与卸载 | 未实现 | pending | pending |
+
+## 2026-10-26 首次 CachyOS 接续记录
+
+- Git：从无未提交修改的 linux checkout 接续至远端 `73e0036`；未回退、清理或读取私人交接。CEF 锁单独提交为 `e80698e`。
+- 本机：CachyOS x86_64、KDE Wayland/XWayland，Python 3.14.8、GCC 16.2.1；GTK 3.24.52、X11 1.8.14、XTest 1.2.6、OpenSSL 3.6.5、libsecret 0.21.8.2。系统 CMake 缺失，使用已核验官方摘要的本地 CMake 4.4.4，未安装系统包。
+- 依赖：官方索引 stable/linux64/standard 完整版本 `156.0.14+g4fa4ab5+chromium-156.0.8078.48`，695590857 字节，上游 SHA-1 与本地 SHA-256 均匹配锁文件。未修改 CEF 包内容。
+- 执行环境：受限执行器看不到 `/dev/dri`，首次解包以信号 139 退出；残留目录保留。主机普通用户环境可见 DRM、`unshare -Ur true` 成功，fetch 完成全部身份核验。未把执行器问题当作 GPU/沙箱禁用理由。
+- 编译修复：CEF CMake 的 C 编译器检测要求项目同时启用 C/C++；CEF 156 使用 C++20，宿主路径异常边界单独启用 `-fexceptions`；删除上游 sample 的 cwd rpath，成品仅有 `$ORIGIN`。helper 权限为 0755，无 setuid。
+- 隔离测试：19 项 Python 检查及 LinuxPlatformChecks CTest 通过，build/test/verify 通过。补充跨进程资料锁、锁文件硬链接/宽松权限拒绝；失败夹具保留。
+- 真实运行（均为新建合成 XDG）：about:blank 窗口已显示；第二实例退出 3 并报告资料占用；标准窗口关闭后退出 0，记录到的全部子进程已退出。没有真实登录或游戏操作。
+- 沙箱：`chrome://sandbox` 显示 Layer 1 Namespace、PID/Network namespaces、Seccomp-BPF、TSYNC 为 Yes；renderer 的 `/proc` 状态也显示 NoNewPrivs=1、Seccomp=2 和独立 user namespace。没有关闭 sandbox 或修改系统策略。
+- GPU：`chrome://gpu` 实际页面显示 Canvas、Compositing、Rasterization、WebGL、WebGPU 为 Hardware accelerated，GPU 进程持有 DRM render 节点。Mesa GBM/Vulkan 探测仍有警告，Vulkan 显示 Disabled、Video Encode 为 Software only；这些不等同于游戏性能或所有图形接口验收。
+- 扩展边界：首轮发现 Chrome bootstrap 会加载系统 Plasma 扩展及 native host；增加 `disable-extensions` 后，新合成进程树未再出现它们。未来助手通过审查的宿主适配接入，不依赖自动扩展加载。
+- 用户验收：候选可执行文件 SHA-256 `5b567d316ab9eb26232187de5b58b56c23d986796de9fd755b1303466a3c1bcb`，用户确认中文输入和页面 100%/125%/150% 缩放均正常，已正常关闭。该反馈不扩大为 KDE 系统缩放切换、多显示器或游戏输入验收。
+- 下一步：进入外壳与消息边界；双窗、代理、助手及后续各里程碑仍未交付。诊断页不能代替完整浏览器验收。
+
+原始日志、窗口截图、合成资料和构建产物只保留于忽略的 `.build/` 与本轮私有 runtime 目录，不进入公开提交。后续桌面检查用 `checks/run_desktop.py` 将证据与构建收据一同保存。
 
 ## 里程碑 1：宿主基线
 

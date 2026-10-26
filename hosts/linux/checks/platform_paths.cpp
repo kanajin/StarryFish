@@ -7,6 +7,7 @@
 #include <map>
 #include <stdexcept>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 namespace {
@@ -42,7 +43,26 @@ int main() {
     {
       ProfileLock first(paths.data);
       Reject([&] { ProfileLock second(paths.data); });
+      const pid_t child = fork();
+      Check(child >= 0);
+      if (child == 0) {
+        try { ProfileLock competing(paths.data); }
+        catch (const std::exception&) { _exit(0); }
+        _exit(1);
+      }
+      int status = 0;
+      Check(waitpid(child, &status, 0) == child && WIFEXITED(status) &&
+            WEXITSTATUS(status) == 0);
     }
+    { ProfileLock reopened(paths.data); }
+    const auto lock_inode = fs::status(paths.data / "profile.lock");
+    Check(fs::is_regular_file(lock_inode));
+    fs::create_hard_link(paths.data / "profile.lock", paths.data / "lock-alias");
+    Reject([&] { ProfileLock unsafe(paths.data); });
+    fs::remove(paths.data / "lock-alias");
+    chmod((paths.data / "profile.lock").c_str(), 0644);
+    Reject([&] { ProfileLock unsafe(paths.data); });
+    chmod((paths.data / "profile.lock").c_str(), 0600);
     { ProfileLock reopened(paths.data); }
     AtomicWrite(paths.config, "settings.json", "first");
     AtomicWrite(paths.config, "settings.json", "second");
@@ -69,8 +89,7 @@ int main() {
     std::cout << "PASS isolated XDG paths, ownership, locks, atomic replacement and links\n";
     return 0;
   } catch (const std::exception& error) {
-    std::cerr << error.what() << '\n';
-    fs::remove_all(root);
+    std::cerr << error.what() << "; fixture retained at " << root << '\n';
     return 1;
   }
 }
