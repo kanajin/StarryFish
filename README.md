@@ -12,6 +12,8 @@
 
 Fork 后的开发入口：[再开发交接](handover/README.md)。
 
+**Linux 开发分支：** `linux` 正在面向 CachyOS x86_64 / KDE Wayland（XWayland）移植。当前仅提供构建接续与宿主基线源码，尚无 Linux 构建或日用验收结论；从 [Linux 接续说明](hosts/linux/README.md) 开始。
+
 **面向《碧蓝幻想》（GBF）的 Windows 专用轻量浏览器。**
 
 > **本项目完全是 vibe coding 的产物。** 由维护者提出需求、体验并反馈，AI 编写和迭代代码、界面及构建流程，产品图标也由 AI 生成。已有自动检查和实际使用反馈，但不意味着没有缺陷，也不等同于专业安全审计。
