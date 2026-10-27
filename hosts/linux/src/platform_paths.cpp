@@ -1,6 +1,7 @@
 #include "platform_paths.h"
 
 #include <cerrno>
+#include <array>
 #include <fcntl.h>
 #include <stdexcept>
 #include <sys/file.h>
@@ -123,6 +124,31 @@ ProfileLock::ProfileLock(const std::filesystem::path& data) {
 ProfileLock::~ProfileLock() {
   // Do not unlink: all processes must contend for the same inode.
   if (descriptor_ >= 0) close(descriptor_);
+}
+
+std::optional<std::string> ReadPrivateFile(const std::filesystem::path& directory,
+                                          const std::string& filename, size_t maximum) {
+  Require(!filename.empty() && filename != "." && filename != ".." &&
+              filename.find('/') == std::string::npos && filename.find('\\') == std::string::npos &&
+              filename.find('\0') == std::string::npos && maximum <= 1024 * 1024,
+          "Invalid private file read");
+  Descriptor parent(OpenDirectory(directory, false));
+  CheckPrivateDirectory(parent.get());
+  const int fd = openat(parent.get(), filename.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+  if (fd < 0 && errno == ENOENT) return std::nullopt;
+  Descriptor input(fd);
+  CheckRegularFile(input.get());
+  std::string contents;
+  std::array<char, 4096> buffer{};
+  while (true) {
+    const auto count = read(input.get(), buffer.data(), buffer.size());
+    if (count < 0 && errno == EINTR) continue;
+    Require(count >= 0, "Cannot read private file");
+    if (!count) break;
+    Require(contents.size() + static_cast<size_t>(count) <= maximum, "Private file exceeds read limit");
+    contents.append(buffer.data(), static_cast<size_t>(count));
+  }
+  return contents;
 }
 
 void AtomicWrite(const std::filesystem::path& directory,

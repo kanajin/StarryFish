@@ -17,7 +17,7 @@
 
 ## 从源码开始
 
-Linux 接续从 [CachyOS 宿主入口](../hosts/linux/README.md) 和 [验收账本](../hosts/linux/PORTING_PLAN.md) 开始。linux 分支已有锁定 CEF、首次原生构建及隔离桌面检查；仍不是完整浏览器。下面的工具链要求专用于 Windows，不应套用到 Linux。
+Linux 接续从 [CachyOS 宿主入口](../hosts/linux/README.md) 和 [验收账本](../hosts/linux/PORTING_PLAN.md) 开始。linux 分支已有锁定 CEF、首次原生构建及隔离桌面检查，已继续接入双布局、主题记忆和基础标签导航。平台无关模型位于 hosts/common；Linux 收据覆盖该目录，Windows 尚未迁入。双窗、完整消息桥和后续功能仍未完成。下面的工具链要求专用于 Windows，不应套用到 Linux。
 
 需要 Windows x64、VS2022 C++ 桌面工具链及 Windows SDK、CMake、Roslyn/.NET Framework 4.8 编译引用、Python 3.11+ 和 Node.js。完整环境说明见 [README](../README.md)。在仓库根目录执行：
 

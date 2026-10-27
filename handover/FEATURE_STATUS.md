@@ -14,7 +14,7 @@
 | GBF 连续后退、Mobage 关闭后的登录接续 | 已有实现和隔离检查 | 真实游戏历史与登录流程仍待受影响用户反馈 |
 | 静态资源缓存 | 已提供 | 实际增量加速效果没有测量，不承诺提速比例 |
 | WebView 快捷键 SDK | 开发者预览 | 第三方宿主集成尚未验收，原生宿主成功不能直接推定 SDK 成功 |
-| Linux | 移植中，未交付完整浏览器 | linux 分支已锁定 CEF 并在 CachyOS 首次编译；隔离 XDG、资料锁、退出、GPU 与 namespace/seccomp 已观察，中文输入/页面缩放用户确认；完整浏览器仍待移植与验收；功能范围见 hosts/linux/PORTING_PLAN.md |
+| Linux | 移植中，未交付完整浏览器 | linux 分支已锁定 CEF 并在 CachyOS 首次编译；隔离 XDG、资料锁、退出、GPU 与 namespace/seccomp 已观察，中文输入/页面缩放用户确认；双布局／主题记忆／基础标签与导航已有合成桌面检查，双窗、完整消息桥及其余功能仍待移植与验收；功能范围见 hosts/linux/PORTING_PLAN.md |
 
 行为与使用边界见 [界面需求](../docs/UI_REQUIREMENTS.md)、[迁移说明](../docs/PROFILE_TRANSFER.md)、[网络采集接口](../docs/NETWORK_CAPTURE.md)、[SDK 说明](../sdk/webview-hotkeys/docs/SDK.md) 和 [发布说明](../RELEASE_NOTES.md)。
 

@@ -211,6 +211,7 @@ def dependency(lock, deps, fetch=False):
 
 def source_manifest(root=ROOT):
     result = {}
+    require(Path(root).is_dir() and not Path(root).is_symlink(), "Missing or linked source root")
     for path in sorted(Path(root).rglob("*")):
         relative = path.relative_to(root)
         if any(p.startswith(".") or p == "__pycache__" for p in relative.parts):
@@ -218,6 +219,9 @@ def source_manifest(root=ROOT):
         require(not path.is_symlink(), "Linked host source")
         if path.is_file() and path.suffix != ".pyc":
             result[relative.as_posix()] = digest(path)
+    if Path(root) == ROOT:
+        result.update({"shared/" + name: value for name, value in
+                       source_manifest(ROOT.parent / "common").items()})
     return result
 
 

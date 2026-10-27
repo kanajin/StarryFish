@@ -66,14 +66,20 @@ int main() {
     { ProfileLock reopened(paths.data); }
     AtomicWrite(paths.config, "settings.json", "first");
     AtomicWrite(paths.config, "settings.json", "second");
+    Check(ReadPrivateFile(paths.config, "settings.json", 6) == "second");
+    Check(!ReadPrivateFile(paths.config, "missing.json", 100));
+    Reject([&] { ReadPrivateFile(paths.config, "settings.json", 5); });
+    Reject([&] { ReadPrivateFile(paths.config, "../outside", 100); });
     std::string content;
     std::ifstream(paths.config / "settings.json") >> content;
     Check(content == "second");
     Reject([&] { AtomicWrite(paths.config, "../escape", "invalid"); });
     fs::create_symlink(paths.config / "settings.json", paths.config / "linked");
     Reject([&] { AtomicWrite(paths.config, "linked", "invalid"); });
+    Reject([&] { ReadPrivateFile(paths.config, "linked", 100); });
     fs::create_hard_link(paths.config / "settings.json", paths.config / "hardlink");
     Reject([&] { AtomicWrite(paths.config, "hardlink", "invalid"); });
+    Reject([&] { ReadPrivateFile(paths.config, "hardlink", 100); });
     chmod(paths.cache.c_str(), 0755);
     Reject([&] { PreparePaths(paths); });
     chmod(paths.cache.c_str(), 0700);

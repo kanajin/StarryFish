@@ -28,7 +28,12 @@ add_subdirectory("${CEF_LIBCEF_DLL_WRAPPER_PATH}" libcef_dll_wrapper)
 ADD_LOGICAL_TARGET(libcef_lib "${CEF_LIB_DEBUG}" "${CEF_LIB_RELEASE}")
 SET_CEF_TARGET_OUT_DIR()
 
-add_executable(starryfish-linux src/main.cpp src/platform_paths.cpp src/diagnostics.cpp)
+add_library(starryfish-shell-model STATIC ../common/shell_model.cpp)
+target_include_directories(starryfish-shell-model PUBLIC ../common)
+target_compile_features(starryfish-shell-model PUBLIC cxx_std_20)
+target_compile_options(starryfish-shell-model PRIVATE -Wall -Wextra -Werror)
+
+add_executable(starryfish-linux src/main.cpp src/platform_paths.cpp src/diagnostics.cpp src/desktop_shell.cpp)
 SET_EXECUTABLE_TARGET_PROPERTIES(starryfish-linux)
 add_dependencies(starryfish-linux libcef_dll_wrapper)
 target_compile_features(starryfish-linux PRIVATE cxx_std_20)
@@ -36,7 +41,7 @@ target_compile_features(starryfish-linux PRIVATE cxx_std_20)
 # catches failures at main() and needs exceptions in this target only.
 target_compile_options(starryfish-linux PRIVATE -Wall -Wextra -Werror -fexceptions)
 target_compile_definitions(starryfish-linux PRIVATE CEF_USE_SANDBOX)
-target_link_libraries(starryfish-linux PRIVATE libcef_lib libcef_dll_wrapper ${CEF_STANDARD_LIBS})
+target_link_libraries(starryfish-linux PRIVATE starryfish-shell-model libcef_lib libcef_dll_wrapper ${CEF_STANDARD_LIBS})
 
 # Keep the CEF shared libraries beside the executable and resolve them through
 # $ORIGIN. Keep the helper as an ordinary file; no privileged build steps.
@@ -64,3 +69,10 @@ target_include_directories(LinuxPlatformChecks PRIVATE src)
 target_compile_features(LinuxPlatformChecks PRIVATE cxx_std_17)
 target_compile_options(LinuxPlatformChecks PRIVATE -Wall -Wextra -Werror)
 add_test(NAME LinuxPlatformChecks COMMAND LinuxPlatformChecks)
+
+add_executable(ShellModelChecks checks/shell_model.cpp)
+target_link_libraries(ShellModelChecks PRIVATE starryfish-shell-model)
+set_target_properties(ShellModelChecks PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${STARRYFISH_OUTPUT_DIR}/checks")
+target_compile_options(ShellModelChecks PRIVATE -Wall -Wextra -Werror)
+add_test(NAME ShellModelChecks COMMAND ShellModelChecks)

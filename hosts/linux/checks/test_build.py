@@ -207,6 +207,19 @@ class BuildChecks(unittest.TestCase):
             with self.assertRaises(ValueError):
                 build.verify(build_dir, value)
 
+    def test_shared_model_changes_invalidate_host_fingerprint(self):
+        host, common = self.root / "linux", self.root / "common"
+        host.mkdir()
+        common.mkdir()
+        (host / "main.cpp").write_text("host", encoding="utf-8")
+        model = common / "model.cpp"
+        model.write_text("first", encoding="utf-8")
+        with mock.patch.object(build, "ROOT", host):
+            before = build.source_manifest(host)
+            self.assertIn("shared/model.cpp", before)
+            model.write_text("changed", encoding="utf-8")
+            self.assertNotEqual(before, build.source_manifest(host))
+
     def test_atomic_json_replaces_complete_document(self):
         path = self.root / "state.json"
         build.atomic_json(path, {"value": "first"})

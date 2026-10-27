@@ -2,6 +2,7 @@
 
 #include <filesystem>
 #include <functional>
+#include <optional>
 #include <string>
 
 namespace starryfish::linux_host {
@@ -17,6 +18,8 @@ struct Paths {
 Paths ResolvePaths(const std::function<std::string(const char*)>& environment);
 // Creates only application-owned subdirectories; refuses links and unsafe owners.
 void PreparePaths(const Paths& paths);
+std::optional<std::string> ReadPrivateFile(const std::filesystem::path& directory,
+                                          const std::string& filename, size_t maximum);
 void AtomicWrite(const std::filesystem::path& directory,
                  const std::string& filename, const std::string& contents);
 

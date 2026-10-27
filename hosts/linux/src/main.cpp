@@ -7,12 +7,15 @@
 #include "include/cef_life_span_handler.h"
 #include "include/cef_load_handler.h"
 #include "include/cef_keyboard_handler.h"
+#include "include/cef_request_handler.h"
+#include "include/cef_jsdialog_handler.h"
 #include "include/cef_request_context.h"
 #include "include/views/cef_browser_view.h"
 #include "include/views/cef_window.h"
 #include "include/wrapper/cef_helpers.h"
 #include "platform_paths.h"
 #include "diagnostics.h"
+#include "desktop_shell.h"
 
 #include <algorithm>
 #include <array>
@@ -30,12 +33,43 @@ class BrowserClient final : public CefClient,
                             public CefDisplayHandler,
                             public CefLoadHandler,
                             public CefKeyboardHandler,
+                            public CefRequestHandler,
+                            public CefJSDialogHandler,
                             public CefLifeSpanHandler {
  public:
   CefRefPtr<CefDisplayHandler> GetDisplayHandler() override { return this; }
   CefRefPtr<CefLifeSpanHandler> GetLifeSpanHandler() override { return this; }
   CefRefPtr<CefLoadHandler> GetLoadHandler() override { return this; }
   CefRefPtr<CefKeyboardHandler> GetKeyboardHandler() override { return this; }
+  CefRefPtr<CefRequestHandler> GetRequestHandler() override { return this; }
+  CefRefPtr<CefJSDialogHandler> GetJSDialogHandler() override { return this; }
+  void SetShell(CefRefPtr<starryfish::linux_host::DesktopShell> shell) {
+    shell_ = shell;
+    for (const auto& browser : browsers_) shell_->BrowserCreated(browser);
+  }
+  void OnDialogClosed(CefRefPtr<CefBrowser>) override { if (shell_) shell_->DialogClosed(); }
+  bool OnBeforeBrowse(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
+                      CefRefPtr<CefRequest> request, bool, bool) override {
+    return frame->IsMain() && shell_ && !shell_->AllowNavigation(browser, request->GetURL());
+  }
+  void OnLoadStart(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
+                   CefLoadHandler::TransitionType) override {
+    if (frame->IsMain() && shell_) shell_->NavigationStarted(browser);
+  }
+  void OnAddressChange(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
+                       const CefString& url) override {
+    if (frame->IsMain() && shell_) shell_->AddressChanged(browser, url);
+  }
+  void OnFaviconURLChange(CefRefPtr<CefBrowser> browser, const std::vector<CefString>& urls) override {
+    if (shell_) shell_->FaviconChanged(browser, urls);
+  }
+  bool OnBeforePopup(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame>, int, const CefString&,
+                     const CefString&, CefLifeSpanHandler::WindowOpenDisposition, bool, const CefPopupFeatures&,
+                     CefWindowInfo&, CefRefPtr<CefClient>&, CefBrowserSettings&,
+                     CefRefPtr<CefDictionaryValue>&, bool*) override {
+    // Login popups require a dedicated opener/source/lifecycle adapter.
+    return true;
+  }
 
   bool OnPreKeyEvent(CefRefPtr<CefBrowser> browser, const CefKeyEvent& event,
                      CefEventHandle, bool*) override {
@@ -77,11 +111,13 @@ class BrowserClient final : public CefClient,
   void OnAfterCreated(CefRefPtr<CefBrowser> browser) override {
     CEF_REQUIRE_UI_THREAD();
     browsers_.push_back(browser);
+    if (shell_) shell_->BrowserCreated(browser);
   }
 
   void OnTitleChange(CefRefPtr<CefBrowser> browser,
                      const CefString& title) override {
     CEF_REQUIRE_UI_THREAD();
+    if (shell_) { shell_->TitleChanged(browser, title); return; }
     const auto browser_view = CefBrowserView::GetForBrowser(browser);
     if (browser_view) {
       const auto window = browser_view->GetWindow();
@@ -91,9 +127,9 @@ class BrowserClient final : public CefClient,
     }
   }
 
-  bool DoClose(CefRefPtr<CefBrowser>) override {
+  bool DoClose(CefRefPtr<CefBrowser> browser) override {
     CEF_REQUIRE_UI_THREAD();
-    return false;
+    return shell_ && shell_->BrowserReadyToClose(browser);
   }
 
   void OnBeforeClose(CefRefPtr<CefBrowser> browser) override {
@@ -104,63 +140,21 @@ class BrowserClient final : public CefClient,
                          return candidate->IsSame(browser);
                        }),
         browsers_.end());
-    if (browsers_.empty()) {
-      CefQuitMessageLoop();
-    }
+    if (shell_) shell_->BrowserClosed(browser);
+    else if (browsers_.empty()) CefQuitMessageLoop();
   }
 
  private:
+  CefRefPtr<starryfish::linux_host::DesktopShell> shell_;
   std::vector<CefRefPtr<CefBrowser>> browsers_;
   IMPLEMENT_REFCOUNTING(BrowserClient);
-};
-
-class BrowserWindowDelegate final : public CefWindowDelegate {
- public:
-  explicit BrowserWindowDelegate(CefRefPtr<CefBrowserView> browser_view)
-      : browser_view_(browser_view) {}
-
-  void OnWindowCreated(CefRefPtr<CefWindow> window) override {
-    window->SetTitle("StarryFish Linux — development");
-    window->AddChildView(browser_view_);
-    window->Show();
-  }
-
-  void OnWindowDestroyed(CefRefPtr<CefWindow>) override {
-    browser_view_ = nullptr;
-  }
-
-  bool CanClose(CefRefPtr<CefWindow>) override {
-    const auto browser = browser_view_ ? browser_view_->GetBrowser() : nullptr;
-    return !browser || browser->GetHost()->TryCloseBrowser();
-  }
-
-  CefSize GetPreferredSize(CefRefPtr<CefView>) override {
-    return CefSize(1280, 820);
-  }
-
-  cef_runtime_style_t GetWindowRuntimeStyle() override {
-    return CEF_RUNTIME_STYLE_ALLOY;
-  }
-
- private:
-  CefRefPtr<CefBrowserView> browser_view_;
-  IMPLEMENT_REFCOUNTING(BrowserWindowDelegate);
-};
-
-class BrowserViewDelegate final : public CefBrowserViewDelegate {
- public:
-  cef_runtime_style_t GetBrowserRuntimeStyle() override {
-    return CEF_RUNTIME_STYLE_ALLOY;
-  }
-
- private:
-  IMPLEMENT_REFCOUNTING(BrowserViewDelegate);
 };
 
 class StarryFishApp final : public CefApp,
                             public CefBrowserProcessHandler {
  public:
   StarryFishApp() : client_(new BrowserClient) {}
+  void SetConfigPath(std::filesystem::path path) { config_ = std::move(path); }
 
   void OnBeforeCommandLineProcessing(const CefString& process_type,
                                      CefRefPtr<CefCommandLine> command_line) override {
@@ -181,19 +175,16 @@ class StarryFishApp final : public CefApp,
 
   void OnContextInitialized() override {
     CEF_REQUIRE_UI_THREAD();
-    CefBrowserSettings settings;
     const auto command = CefCommandLine::GetGlobalCommandLine();
     const auto initial_url = command->HasSwitch("diagnostic-page")
         ? starryfish::linux_host::DiagnosticUrl(command->GetSwitchValue("diagnostic-page"))
         : (command->HasSwitch("smoke-test") ? "about:blank" : kHomeUrl);
-    const auto view = CefBrowserView::CreateBrowserView(
-        client_, initial_url, settings, nullptr, nullptr,
-        new BrowserViewDelegate());
-    CefWindow::CreateTopLevelWindow(new BrowserWindowDelegate(view));
+    client_->SetShell(starryfish::linux_host::CreateDesktopShell(client_, initial_url, config_));
   }
 
  private:
   CefRefPtr<BrowserClient> client_;
+  std::filesystem::path config_;
   IMPLEMENT_REFCOUNTING(StarryFishApp);
 };
 
@@ -231,6 +222,7 @@ NO_STACK_PROTECTOR int main(int argc, char* argv[]) {
       return value ? std::string(value) : std::string();
     });
     starryfish::linux_host::PreparePaths(paths);
+    app->SetConfigPath(paths.config);
     const starryfish::linux_host::ProfileLock profile_lock(paths.data);
     CefSettings settings;
     // Alloy style uses modern Chrome bootstrap and owns the browser chrome.
